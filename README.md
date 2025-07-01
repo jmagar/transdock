@@ -32,6 +32,8 @@ transdock/
 │   └── start-backend.sh # Backend startup script
 ├── docs/                # Documentation
 │   └── API.md          # Complete API documentation
+├── main.py              # UV entry point
+├── pyproject.toml       # UV project configuration
 ├── transdock.sh         # Main launcher script
 └── README.md           # This file
 ```
@@ -40,7 +42,7 @@ transdock/
 
 ### Prerequisites
 
-- **Python 3.8+** with pip
+- **UV** - Modern Python package manager ([install here](https://docs.astral.sh/uv/getting-started/installation/))
 - **ZFS** installed and configured
 - **Docker** and **docker-compose**
 - **SSH access** to target machines
@@ -54,9 +56,10 @@ transdock/
    cd transdock
    ```
 
-2. **Install dependencies:**
+2. **Install dependencies with UV:**
    ```bash
    ./transdock.sh install
+   # or directly: uv sync
    ```
 
 3. **Start the backend service:**
@@ -75,8 +78,35 @@ The API will be available at `http://localhost:8000` with interactive docs at `h
 # Development mode (same as backend for now)
 ./transdock.sh dev
 
+# Update dependencies
+./transdock.sh sync
+
+# Open UV shell with virtual environment
+./transdock.sh shell
+
 # Help and available commands
 ./transdock.sh help
+```
+
+### UV Commands
+
+TransDock uses **UV** for modern Python dependency management:
+
+```bash
+# Install/update all dependencies
+uv sync
+
+# Run the application
+uv run python main.py
+
+# Run any command in the virtual environment
+uv run <command>
+
+# Add new dependencies
+uv add <package>
+
+# Open shell with activated environment
+uv shell
 ```
 
 ## 📡 API Usage
@@ -105,7 +135,7 @@ print(f"Status: {status.json()['status']} - {status.json()['progress']}%")
 
 ```bash
 cd backend
-python3 example.py
+uv run python example.py
 ```
 
 See the [API Documentation](docs/API.md) for complete endpoint details.
@@ -128,7 +158,7 @@ export TRANSDOCK_APPDATA_BASE="/custom/appdata/path"
 export TRANSDOCK_ZFS_POOL="custom-pool"
 ```
 
-## �� Migration Process
+## 🔄 Migration Process
 
 TransDock follows a 12-step migration workflow:
 
