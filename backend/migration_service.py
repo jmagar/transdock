@@ -38,7 +38,7 @@ class MigrationService:
                 request.target_base_path
             )
         except SecurityValidationError as e:
-            raise Exception(f"Security validation failed: {e}") from e
+            raise ValueError(f"Security validation failed: {e}") from e
         
         # Initialize migration status
         status = MigrationStatus(
@@ -95,14 +95,180 @@ class MigrationService:
             if not os.path.exists(compose_dir):
                 raise Exception(f"Compose dataset not found: {compose_dir}")
             
-            # Steps 2-12 continue with migration process...
-            # [Content truncated for brevity in commit message]
+            # Step 2: Find and parse compose file
+            await self._update_status(migration_id, "parsing", 10, "Parsing docker-compose file")
+            
+            compose_file = await self.docker_ops.find_compose_file(compose_dir)
+            if not compose_file:
+                raise Exception(f"No docker-compose file found in {compose_dir}")
+            
+            compose_data = await self.docker_ops.parse_compose_file(compose_file)
+            
+            # Step 3: Extract volume mounts
+            await self._update_status(migration_id, "analyzing", 15, "Analyzing volume mounts")
+            
+            volumes = await self.docker_ops.extract_volume_mounts(compose_data)
+            self.active_migrations[migration_id].volumes = volumes
+            
+            logger.info(f"Found {len(volumes)} volume mounts for migration {migration_id}")
+            
+            # Step 4: Stop the compose stack
+            await self._update_status(migration_id, "stopping", 20, "Stopping Docker compose stack")
+            
+            if not await self.docker_ops.stop_compose_stack(compose_dir):
+                raise Exception("Failed to stop Docker compose stack")
+            
+            # Step 5: Create snapshots for compose and volume datasets
+            await self._update_status(migration_id, "snapshotting", 25, "Creating ZFS snapshots")
+            
+            snapshots = []
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Snapshot the compose dataset
+            if not await self.zfs_ops.is_dataset(compose_dir):
+                if not await self.zfs_ops.create_dataset(compose_dir):
+                    raise Exception(f"Failed to convert {compose_dir} to dataset")
+            
+            compose_snapshot = await self.zfs_ops.create_snapshot(compose_dir, f"migration_{timestamp}")
+            snapshots.append((compose_snapshot, compose_dir))
+            
+            # Process each volume mount
+            for i, volume in enumerate(volumes):
+                progress = 25 + (i + 1) * (35 / len(volumes))
+                await self._update_status(
+                    migration_id, "snapshotting", int(progress),
+                    f"Creating snapshot for {volume.source}"
+                )
+                
+                # Check if volume source is a dataset, convert if not
+                if not await self.zfs_ops.is_dataset(volume.source):
+                    if not await self.zfs_ops.create_dataset(volume.source):
+                        logger.warning(f"Failed to convert {volume.source} to dataset, skipping...")
+                        continue
+                
+                # Create snapshot
+                volume_snapshot = await self.zfs_ops.create_snapshot(volume.source, f"migration_{timestamp}")
+                snapshots.append((volume_snapshot, volume.source))
+                volume.is_dataset = True
+                volume.dataset_path = await self.zfs_ops.get_dataset_name(volume.source)
+            
+            # Step 6: Determine transfer method
+            await self._update_status(migration_id, "checking", 60, "Checking target system capabilities")
+            
+            has_remote_zfs = await self.zfs_ops.check_remote_zfs(
+                request.target_host, request.ssh_user, request.ssh_port
+            )
+            
+            if request.force_rsync or not has_remote_zfs:
+                transfer_method = TransferMethod.RSYNC
+                await self._update_status(migration_id, "preparing", 65, "Preparing rsync transfer")
+            else:
+                transfer_method = TransferMethod.ZFS_SEND
+                await self._update_status(migration_id, "preparing", 65, "Preparing ZFS send transfer")
+            
+            self.active_migrations[migration_id].transfer_method = transfer_method
+            
+            # Step 7: Create volume path mapping
+            volume_mapping = await self.transfer_ops.create_volume_mapping(volumes, request.target_base_path)
+            
+            # Safely create compose target path to prevent path traversal
+            compose_basename = os.path.basename(compose_dir)
+            compose_target_path = SecurityUtils.sanitize_path(
+                os.path.join(request.target_base_path, "compose", compose_basename)
+            )
+            
+            # Add compose directory to mapping
+            volume_mapping[compose_dir] = compose_target_path
+            
+            # Step 8: Transfer data
+            await self._update_status(migration_id, "transferring", 70, "Transferring data to target")
+            
+            for i, (snapshot_name, source_path) in enumerate(snapshots):
+                progress = 70 + (i + 1) * (20 / len(snapshots))
+                
+                if source_path == compose_dir:
+                    target_path = compose_target_path
+                    description = "compose files"
+                else:
+                    target_path = volume_mapping.get(source_path, f"{request.target_base_path}/volumes/{os.path.basename(source_path)}")
+                    description = f"volume {os.path.basename(source_path)}"
+                
+                await self._update_status(
+                    migration_id, "transferring", int(progress),
+                    f"Transferring {description}"
+                )
+                
+                # Execute transfer based on method
+                if transfer_method == TransferMethod.ZFS_SEND:
+                    dataset_name = await self.zfs_ops.get_dataset_name(source_path)
+                    target_dataset = target_path.replace(f"{request.target_base_path}/", "").replace("/", "_")
+                    
+                    success = await self.zfs_ops.send_snapshot(
+                        snapshot_name, request.target_host, target_dataset,
+                        request.ssh_user, request.ssh_port
+                    )
+                else:  # RSYNC
+                    success = await self.transfer_ops.rsync_transfer(
+                        source_path, request.target_host, target_path,
+                        request.ssh_user, request.ssh_port
+                    )
+                
+                if not success:
+                    raise Exception(f"Failed to transfer {source_path}")
+            
+            # Step 9: Generate updated docker-compose file
+            await self._update_status(migration_id, "generating", 90, "Generating updated compose file")
+            
+            updated_compose = await self.docker_ops.update_compose_paths(compose_data, volume_mapping)
+            
+            # Step 10: Save updated compose file on target
+            await self._update_status(migration_id, "finalizing", 95, "Saving updated compose configuration")
+            
+            # Write updated compose file
+            target_compose_file = os.path.join(compose_target_path, "docker-compose.yml")
+            
+            # Use secure file operations
+            success = await self.transfer_ops.write_remote_file(
+                request.target_host, target_compose_file, updated_compose,
+                request.ssh_user, request.ssh_port
+            )
+            
+            if not success:
+                raise Exception("Failed to save updated compose file")
+            
+            # Step 11: Clean up snapshots
+            await self._update_status(migration_id, "cleaning", 98, "Cleaning up snapshots")
+            
+            for snapshot_name, _ in snapshots:
+                await self.zfs_ops.cleanup_snapshot(snapshot_name)
+            
+            # Step 12: Complete migration
+            await self._update_status(migration_id, "completed", 100, "Migration completed successfully")
+            
+            # Store final configuration
+            self.active_migrations[migration_id].target_compose_path = compose_target_path
+            self.active_migrations[migration_id].volume_mapping = volume_mapping
+            
+            logger.info(f"Migration {migration_id} completed successfully")
             
         except Exception as e:
             await self._update_error(migration_id, str(e))
-            # Try to restart the original stack if it was stopped
-            try:
-                compose_dir = self.docker_ops.get_compose_path(request.compose_dataset)
-                await self.docker_ops.start_compose_stack(compose_dir)
-            except:
-                pass
+            logger.exception(f"Migration {migration_id} failed")
+    
+    async def cleanup_migration(self, migration_id: str) -> bool:
+        """Clean up migration resources"""
+        if migration_id not in self.active_migrations:
+            return False
+        
+        status = self.active_migrations[migration_id]
+        
+        # Clean up any remaining snapshots
+        if hasattr(status, 'snapshots'):
+            for snapshot_name in status.snapshots:
+                await self.zfs_ops.cleanup_snapshot(snapshot_name)
+        
+        # Remove from active migrations
+        del self.active_migrations[migration_id]
+        
+        logger.info(f"Cleaned up migration {migration_id}")
+        return True
