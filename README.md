@@ -1,252 +1,214 @@
 # TransDock - Docker Stack Migration Tool
 
-TransDock is a powerful tool for migrating Docker Compose stacks between machines using ZFS snapshots. It's designed specifically for Unraid environments but can work with any ZFS-enabled system.
+TransDock is a powerful tool for migrating Docker Compose stacks between machines using ZFS snapshots. It's designed for Unraid environments but works with any ZFS-enabled system.
 
-## Features
+## ✨ Features
 
 - **Automated Migration**: Migrate entire Docker Compose stacks with a single API call
 - **ZFS Integration**: Leverages ZFS snapshots for consistent data transfer
-- **Intelligent Transfer**: Automatically chooses between ZFS send/receive or rsync based on target capabilities
+- **Intelligent Transfer**: Automatically chooses between ZFS send/receive or rsync
 - **Volume Management**: Automatically detects and converts directories to ZFS datasets
-- **Path Updating**: Updates Docker Compose files with new paths on the target machine
+- **Path Translation**: Updates Docker Compose files with new paths on target machine
 - **RESTful API**: Fully featured FastAPI backend ready for frontend integration
 - **Progress Tracking**: Real-time migration progress and status updates
+- **Error Recovery**: Comprehensive error handling with rollback capabilities
 
-## Architecture
-
-TransDock consists of several key components:
-
-1. **ZFS Operations** (`zfs_ops.py`) - Handles dataset creation, snapshots, and ZFS send/receive
-2. **Docker Operations** (`docker_ops.py`) - Manages Docker Compose parsing and stack control
-3. **Transfer Operations** (`transfer_ops.py`) - Handles data transfer via ZFS send or rsync
-4. **Migration Service** (`migration_service.py`) - Orchestrates the entire migration process
-5. **FastAPI App** (`main.py`) - Provides RESTful API endpoints
-
-## Installation
-
-### Prerequisites
-
-- Python 3.8+
-- ZFS utilities (`zfs`, `zpool`)
-- Docker and docker-compose
-- rsync (for fallback transfers)
-- SSH access to target machines
-
-### Setup
-
-1. Clone or copy the TransDock files to your desired location:
-   ```bash
-   # Files should be in /mnt/cache/code/transdock/
-   ```
-
-2. Install Python dependencies:
-   ```bash
-   cd /mnt/cache/code/transdock
-   pip3 install -r requirements.txt
-   ```
-
-3. Start the service:
-   ```bash
-   ./start.sh
-   ```
-
-The API will be available at `http://localhost:8000` with documentation at `http://localhost:8000/docs`.
-
-## Usage
-
-### API Endpoints
-
-#### Start Migration
-```http
-POST /migrations
-Content-Type: application/json
-
-{
-  "compose_dataset": "cache/compose/authelia",
-  "target_host": "192.168.1.100",
-  "target_base_path": "/home/jmagar",
-  "ssh_user": "root",
-  "ssh_port": 22,
-  "force_rsync": false
-}
-```
-
-#### Check Migration Status
-```http
-GET /migrations/{migration_id}
-```
-
-#### List All Migrations
-```http
-GET /migrations
-```
-
-#### System Information
-```http
-GET /system/info
-GET /zfs/status
-GET /datasets
-GET /compose/stacks
-```
-
-### Example Migration Process
-
-1. **Analyze a stack** to see what volumes will be migrated:
-   ```http
-   POST /compose/authelia/analyze
-   ```
-
-2. **Start migration** with your target details:
-   ```json
-   {
-     "compose_dataset": "authelia",
-     "target_host": "192.168.1.100", 
-     "target_base_path": "/home/jmagar"
-   }
-   ```
-
-3. **Monitor progress** using the returned migration ID:
-   ```http
-   GET /migrations/12345678-1234-1234-1234-123456789abc
-   ```
-
-## Migration Process
-
-TransDock follows this workflow:
-
-1. **Validation** - Checks ZFS availability and validates inputs
-2. **Analysis** - Parses docker-compose file and identifies volume mounts
-3. **Stopping** - Stops the Docker Compose stack
-4. **Dataset Conversion** - Converts directories to ZFS datasets if needed
-5. **Snapshotting** - Creates ZFS snapshots of all datasets
-6. **Transfer Method Selection** - Chooses ZFS send or rsync based on target capabilities
-7. **Data Transfer** - Transfers all data to target machine
-8. **Path Updates** - Updates docker-compose file with new paths
-9. **Stack Startup** - Starts the migrated stack on the target
-10. **Cleanup** - Removes temporary snapshots
-
-## Configuration
-
-### Environment Variables
-
-You can customize behavior through environment variables:
-
-- `TRANSDOCK_PORT` - API port (default: 8000)
-- `TRANSDOCK_HOST` - API host (default: 0.0.0.0)
-- `COMPOSE_BASE_PATH` - Base path for compose files (default: /mnt/cache/compose)
-- `APPDATA_BASE_PATH` - Base path for app data (default: /mnt/cache/appdata)
-
-### Custom Paths
-
-Edit the configuration in the respective modules:
-
-```python
-# docker_ops.py
-self.compose_base_path = "/mnt/cache/compose"
-self.appdata_base_path = "/mnt/cache/appdata"
-
-# zfs_ops.py  
-self.pool_name = "cache"  # Default Unraid cache pool
-```
-
-## Security Considerations
-
-- Ensure SSH key authentication is set up between source and target machines
-- Consider using SSH agent forwarding for automated deployments
-- Restrict API access using firewalls or reverse proxies
-- Validate target paths to prevent directory traversal attacks
-
-## Troubleshooting
-
-### Common Issues
-
-1. **ZFS Not Available**
-   - Ensure ZFS kernel modules are loaded
-   - Check if `zfs` and `zpool` commands are available
-
-2. **SSH Connection Failed**
-   - Verify SSH key authentication is working
-   - Check firewall settings on target machine
-   - Ensure SSH daemon is running on target
-
-3. **Permission Denied**
-   - Run TransDock as root or with appropriate ZFS permissions
-   - Ensure SSH user has sufficient privileges on target
-
-4. **Dataset Creation Failed**
-   - Check available space in ZFS pool
-   - Verify parent dataset exists
-   - Ensure proper ZFS permissions
-
-### Logging
-
-TransDock provides detailed logging. Check logs for specific error messages:
-
-```bash
-# Run with increased verbosity
-PYTHONPATH=/mnt/cache/code/transdock python3 -c "
-import logging
-logging.basicConfig(level=logging.DEBUG)
-from main import app
-import uvicorn
-uvicorn.run(app, host='0.0.0.0', port=8000, log_level='debug')
-"
-```
-
-## Development
-
-### Project Structure
+## 🏗️ Project Structure
 
 ```
 transdock/
-├── main.py              # FastAPI application
-├── models.py            # Pydantic data models
-├── migration_service.py # Main orchestration service
-├── zfs_ops.py          # ZFS operations
-├── docker_ops.py       # Docker operations  
-├── transfer_ops.py     # Transfer operations
-├── requirements.txt    # Python dependencies
-├── start.sh           # Startup script
-└── README.md          # This file
+├── backend/              # FastAPI backend service
+│   ├── main.py          # API application entry point
+│   ├── models.py        # Pydantic data models
+│   ├── migration_service.py  # Core migration orchestration
+│   ├── zfs_ops.py       # ZFS operations (snapshots, send/receive)
+│   ├── docker_ops.py    # Docker Compose parsing and control
+│   ├── transfer_ops.py  # Data transfer operations
+│   ├── example.py       # API client example
+│   └── requirements.txt # Python dependencies
+├── frontend/            # Web UI (planned)
+│   └── README.md        # Frontend development guide
+├── scripts/             # Utility scripts
+│   └── start-backend.sh # Backend startup script
+├── docs/                # Documentation
+│   └── API.md          # Complete API documentation
+├── transdock.sh         # Main launcher script
+└── README.md           # This file
 ```
 
-### Adding Features
+## 🚀 Quick Start
 
-To extend TransDock:
+### Prerequisites
 
-1. Add new models to `models.py`
-2. Implement operations in appropriate `*_ops.py` files
-3. Update `migration_service.py` for orchestration changes
-4. Add API endpoints to `main.py`
+- **Python 3.8+** with pip
+- **ZFS** installed and configured
+- **Docker** and **docker-compose**
+- **SSH access** to target machines
+- **rsync** for fallback transfers
 
-## Future Enhancements
+### Installation
 
-- Web-based frontend interface
-- Support for additional container orchestrators (Kubernetes, Swarm)
-- Database persistence for migration history
-- Webhook notifications for migration events
-- Advanced scheduling and retry mechanisms
-- Support for incremental transfers
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/jmagar/transdock.git
+   cd transdock
+   ```
 
-## License
+2. **Install dependencies:**
+   ```bash
+   ./transdock.sh install
+   ```
 
-TransDock is released under the MIT License. See LICENSE file for details.
+3. **Start the backend service:**
+   ```bash
+   ./transdock.sh backend
+   ```
 
-## Contributing
+The API will be available at `http://localhost:8000` with interactive docs at `http://localhost:8000/docs`.
 
-Contributions are welcome! Please:
+### Alternative Startup Methods
 
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all tests pass
-5. Submit a pull request
+```bash
+# Direct backend startup
+./scripts/start-backend.sh
 
-## Support
+# Development mode (same as backend for now)
+./transdock.sh dev
 
-For issues and questions:
+# Help and available commands
+./transdock.sh help
+```
 
-1. Check the troubleshooting section
-2. Review API documentation at `/docs`
-3. Create an issue with detailed error information
-4. Include relevant log output and system information 
+## 📡 API Usage
+
+### Basic Migration Example
+
+```python
+import requests
+
+# Start a migration
+response = requests.post("http://localhost:8000/migrations", json={
+    "compose_dataset": "authelia",
+    "target_host": "192.168.1.100", 
+    "target_base_path": "/home/jmagar",
+    "ssh_user": "root"
+})
+
+migration_id = response.json()["migration_id"]
+
+# Check status
+status = requests.get(f"http://localhost:8000/migrations/{migration_id}")
+print(f"Status: {status.json()['status']} - {status.json()['progress']}%")
+```
+
+### Using the Example Client
+
+```bash
+cd backend
+python3 example.py
+```
+
+See the [API Documentation](docs/API.md) for complete endpoint details.
+
+## 🔧 Configuration
+
+### Default Paths
+
+- **Compose Base**: `/mnt/cache/compose` (Unraid default)
+- **AppData Base**: `/mnt/cache/appdata` (Unraid default)
+- **ZFS Pool**: `cache` (Unraid cache pool)
+
+### Environment Variables
+
+Set these in your shell or startup script:
+
+```bash
+export TRANSDOCK_COMPOSE_BASE="/custom/compose/path"
+export TRANSDOCK_APPDATA_BASE="/custom/appdata/path"
+export TRANSDOCK_ZFS_POOL="custom-pool"
+```
+
+## �� Migration Process
+
+TransDock follows a 12-step migration workflow:
+
+1. **Validation** - Check inputs and ZFS availability
+2. **Parsing** - Parse docker-compose file
+3. **Analysis** - Extract volume mounts and dependencies
+4. **Stopping** - Stop source Docker stack
+5. **Dataset Conversion** - Convert directories to ZFS datasets
+6. **Snapshotting** - Create atomic ZFS snapshots
+7. **Capability Check** - Determine target transfer method
+8. **Transfer Method** - Choose ZFS send or rsync
+9. **Data Transfer** - Move data to target machine
+10. **Path Updates** - Update compose file paths
+11. **Stack Startup** - Start stack on target machine
+12. **Cleanup** - Remove temporary snapshots
+
+## 🎯 Use Cases
+
+### Unraid to Unraid Migration
+```bash
+# Migrate between Unraid servers with ZFS cache pools
+curl -X POST "http://localhost:8000/migrations" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "compose_dataset": "nextcloud",
+    "target_host": "unraid2.local",
+    "target_base_path": "/mnt/cache"
+  }'
+```
+
+### Unraid to Linux Server
+```bash
+# Migrate to non-ZFS system (uses rsync)
+curl -X POST "http://localhost:8000/migrations" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "compose_dataset": "homeassistant",
+    "target_host": "ubuntu-server.local",
+    "target_base_path": "/opt/docker",
+    "force_rsync": true
+  }'
+```
+
+## 🌐 Frontend Development
+
+The web UI is planned for future development. See [frontend/README.md](frontend/README.md) for the roadmap and setup instructions.
+
+**Planned features:**
+- Migration wizard with guided setup
+- Real-time progress dashboard
+- Stack browser and analyzer
+- Migration history and logs
+- SSH key management
+
+## 📖 Documentation
+
+- [API Documentation](docs/API.md) - Complete API reference
+- [Frontend Roadmap](frontend/README.md) - Web UI development plan
+- Backend code is extensively commented for developers
+
+## 🤝 Contributing
+
+Contributions are welcome! Areas needing development:
+
+- **Frontend Implementation** - React/Vue.js web interface
+- **Authentication** - API key or OAuth support
+- **Monitoring** - Prometheus metrics and alerting
+- **Testing** - Unit and integration tests
+- **Docker Support** - Containerized deployment options
+
+## 📄 License
+
+This project is open source. See the repository for license details.
+
+## 🆘 Support
+
+- **Issues**: Report bugs and feature requests on GitHub
+- **API Docs**: http://localhost:8000/docs when running
+- **Examples**: See `backend/example.py` for usage patterns
+
+---
+
+**TransDock v1.0** - Built for reliable Docker stack migrations with ZFS snapshots 
