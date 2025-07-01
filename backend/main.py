@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import logging
+import asyncio
 from typing import List, Optional
 from models import MigrationRequest, MigrationResponse, MigrationStatus
 from migration_service import MigrationService
@@ -201,16 +202,26 @@ async def system_info():
         
         # Check Docker
         try:
-            result = subprocess.run(["docker", "--version"], capture_output=True, text=True)
-            info["docker_version"] = result.stdout.strip() if result.returncode == 0 else "Not available"
-        except:
+            process = await asyncio.create_subprocess_exec(
+                "docker", "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            info["docker_version"] = stdout.decode().strip() if process.returncode == 0 else "Not available"
+        except Exception:
             info["docker_version"] = "Not available"
         
         # Check docker-compose
         try:
-            result = subprocess.run(["docker-compose", "--version"], capture_output=True, text=True)
-            info["docker_compose_version"] = result.stdout.strip() if result.returncode == 0 else "Not available"
-        except:
+            process = await asyncio.create_subprocess_exec(
+                "docker-compose", "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            info["docker_compose_version"] = stdout.decode().strip() if process.returncode == 0 else "Not available"
+        except Exception:
             info["docker_compose_version"] = "Not available"
         
         # Check ZFS
@@ -223,4 +234,4 @@ async def system_info():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)
