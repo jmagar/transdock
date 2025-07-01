@@ -1,0 +1,44 @@
+[project]
+name = "transdock"
+version = "1.0.0"
+description = "Docker Stack Migration Tool using ZFS snapshots"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.104.1",
+    "uvicorn[standard]==0.24.0",
+    "pydantic==2.5.0",
+    "paramiko==3.3.1",
+    "PyYAML==6.0.1",
+    "python-multipart==0.0.6",
+    "aiofiles==23.2.1",
+]
+authors = [
+    {name = "jmagar", email = "jmagar@users.noreply.github.com"}
+]
+license = {text = "MIT"}
+keywords = ["docker", "migration", "zfs", "unraid", "compose"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Systems Administration",
+]
+
+[project.urls]
+Homepage = "https://github.com/jmagar/transdock"
+Repository = "https://github.com/jmagar/transdock"
+Issues = "https://github.com/jmagar/transdock/issues"
+
+[project.scripts]
+transdock-api = "backend.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

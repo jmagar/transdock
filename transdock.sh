@@ -18,23 +18,32 @@ show_help() {
     echo "  frontend    Start the frontend development server (coming soon)"
     echo "  dev         Start both backend and frontend in development mode"
     echo "  install     Install dependencies for all components"
+    echo "  sync        Sync virtual environment with UV"
+    echo "  shell       Open UV shell with activated virtual environment"
     echo "  help        Show this help message"
     echo ""
     echo "Examples:"
     echo "  $0 backend          # Start only the backend API"
     echo "  $0 dev              # Start full development environment"
+    echo "  $0 sync             # Update dependencies"
     echo ""
 }
 
 install_deps() {
-    echo "Installing TransDock dependencies..."
+    echo "Installing TransDock dependencies with UV..."
     
-    # Install backend dependencies
-    if [ -f "$SCRIPT_DIR/backend/requirements.txt" ]; then
-        echo "Installing backend dependencies..."
-        cd "$SCRIPT_DIR/backend"
-        pip3 install -r requirements.txt
+    # Check if UV is available
+    if ! command -v uv &> /dev/null; then
+        echo "Error: UV is required but not installed."
+        echo "Install UV with: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        exit 1
     fi
+    
+    cd "$SCRIPT_DIR"
+    
+    # Sync the virtual environment
+    echo "Syncing virtual environment..."
+    uv sync
     
     # Future: Install frontend dependencies
     # if [ -f "$SCRIPT_DIR/frontend/package.json" ]; then
@@ -44,6 +53,31 @@ install_deps() {
     # fi
     
     echo "Dependencies installed successfully!"
+}
+
+sync_deps() {
+    echo "Syncing TransDock dependencies with UV..."
+    
+    if ! command -v uv &> /dev/null; then
+        echo "Error: UV is required but not installed."
+        exit 1
+    fi
+    
+    cd "$SCRIPT_DIR"
+    uv sync
+    echo "Dependencies synced successfully!"
+}
+
+start_shell() {
+    echo "Starting UV shell with activated virtual environment..."
+    
+    if ! command -v uv &> /dev/null; then
+        echo "Error: UV is required but not installed."
+        exit 1
+    fi
+    
+    cd "$SCRIPT_DIR"
+    exec uv run bash
 }
 
 start_backend() {
@@ -78,6 +112,12 @@ case "${1:-help}" in
         ;;
     install|deps)
         install_deps
+        ;;
+    sync)
+        sync_deps
+        ;;
+    shell)
+        start_shell
         ;;
     help|--help|-h)
         show_help

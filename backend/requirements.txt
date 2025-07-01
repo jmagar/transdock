@@ -4,5 +4,4 @@ pydantic==2.5.0
 paramiko==3.3.1
 PyYAML==6.0.1
 python-multipart==0.0.6
-aiofiles==23.2.1
-asyncio-subprocess==0.1.0 
+aiofiles==23.2.1 
