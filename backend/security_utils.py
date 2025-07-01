@@ -3,12 +3,24 @@
 import os
 import re
 import shlex
+from dataclasses import dataclass
 from typing import List, Optional
 
 
 class SecurityValidationError(Exception):
     """Exception raised when security validation fails."""
     pass
+
+
+@dataclass
+class RsyncConfig:
+    """Configuration object for rsync command building."""
+    source: str
+    hostname: str
+    username: str
+    port: int
+    target: str
+    additional_args: Optional[List[str]] = None
 
 
 class SecurityUtils:
@@ -87,8 +99,10 @@ class SecurityUtils:
         
         # If base_path is provided, ensure the path is within it
         if base_path:
-            base_path = os.path.normpath(base_path)
-            if not normalized_path.startswith(base_path):
+            # Make paths absolute for reliable comparison
+            abs_base = os.path.abspath(base_path)
+            abs_normalized = os.path.abspath(normalized_path)
+            if not abs_normalized.startswith(abs_base + os.sep) and abs_normalized != abs_base:
                 raise SecurityValidationError(f"Path is outside base directory: {path}")
         
         return normalized_path
@@ -116,23 +130,26 @@ class SecurityUtils:
         ]
     
     @staticmethod
-    def build_rsync_command(source: str, hostname: str, username: str, port: int, target: str, 
-                            additional_args: Optional[List[str]] = None) -> List[str]:
-        """Build a secure rsync command with proper escaping."""
+    def build_rsync_command(config: RsyncConfig) -> List[str]:
+        """Build a secure rsync command with proper escaping using RsyncConfig."""
         # Validate inputs
-        hostname = SecurityUtils.validate_hostname(hostname)
-        username = SecurityUtils.validate_username(username)
-        port = SecurityUtils.validate_port(port)
+        hostname = SecurityUtils.validate_hostname(config.hostname)
+        username = SecurityUtils.validate_username(config.username)
+        port = SecurityUtils.validate_port(config.port)
         
         # Build base command - check for --delete in additional_args to avoid duplication
         cmd = ["rsync", "-avzP"]
         
+        # Track existing flags to avoid duplicates
+        existing_flags = set(cmd)
+        
         # Add additional arguments if provided
-        if additional_args:
-            cmd.extend(additional_args)
+        if config.additional_args:
+            cmd.extend(arg for arg in config.additional_args if arg not in existing_flags)
+            existing_flags.update(config.additional_args)
         
         # Add --delete if not already present in additional_args
-        if not additional_args or "--delete" not in additional_args:
+        if "--delete" not in existing_flags:
             cmd.append("--delete")
         
         # Add SSH specification
@@ -140,8 +157,8 @@ class SecurityUtils:
         
         # Add source and destination with proper escaping
         cmd.extend([
-            SecurityUtils.escape_shell_argument(source),
-            f"{username}@{hostname}:{SecurityUtils.escape_shell_argument(target)}"
+            SecurityUtils.escape_shell_argument(config.source),
+            f"{username}@{hostname}:{SecurityUtils.escape_shell_argument(config.target)}"
         ])
         
         return cmd
@@ -157,40 +174,28 @@ class SecurityUtils:
         for arg in args:
             if isinstance(arg, str):
                 # Basic validation for ZFS arguments
-                if '\0' in arg or len(arg) > 1024:
-                    raise SecurityValidationError(f"Invalid ZFS argument: {arg}")
-                validated_args.append(arg)
+                if len(arg) > 512:  # Reasonable limit
+                    raise SecurityValidationError(f"ZFS argument too long: {arg[:50]}...")
+                
+                # Check for command injection attempts
+                if any(char in arg for char in ['&', '|', ';', '`', '$', '(', ')', '\n', '\r']):
+                    raise SecurityValidationError(f"ZFS argument contains invalid characters: {arg}")
+                    
+                validated_args.append(SecurityUtils.escape_shell_argument(arg))
             else:
                 validated_args.append(str(arg))
         
         return validated_args
     
     @staticmethod
-    def create_secure_mount_point(base_path: str, identifier: str) -> str:
-        """Create a secure mount point path."""
-        # Sanitize identifier
-        safe_identifier = re.sub(r'[^a-zA-Z0-9_-]', '_', identifier)
-        
-        # Create path within base directory
-        mount_point = os.path.join(base_path, safe_identifier)
-        
-        # Validate the resulting path
-        return SecurityUtils.sanitize_path(mount_point, base_path)
-    
-    @staticmethod
     def validate_migration_request(compose_dataset: str, target_host: str, 
-                                 ssh_user: str, ssh_port: int, target_base_path: str) -> None:
-        """Validate all parameters of a migration request."""
-        # Validate compose dataset
-        if not compose_dataset:
-            raise SecurityValidationError("Compose dataset cannot be empty")
-        
-        # Validate target host
-        SecurityUtils.validate_hostname(target_host)
-        
-        # Validate SSH credentials
-        SecurityUtils.validate_username(ssh_user)
-        SecurityUtils.validate_port(ssh_port)
-        
-        # Validate target base path
-        SecurityUtils.sanitize_path(target_base_path)
+                                   ssh_user: str, ssh_port: int, target_base_path: str) -> None:
+        """Validate all parameters for a complete migration request."""
+        try:
+            SecurityUtils.validate_dataset_name(compose_dataset)
+            SecurityUtils.validate_hostname(target_host)
+            SecurityUtils.validate_username(ssh_user)
+            SecurityUtils.validate_port(ssh_port)
+            SecurityUtils.sanitize_path(target_base_path)
+        except SecurityValidationError as e:
+            raise SecurityValidationError(f"Migration validation failed: {e}") from e
