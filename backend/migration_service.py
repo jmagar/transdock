@@ -2,6 +2,8 @@ import asyncio
 import os
 import uuid
 import logging
+import tempfile
+import yaml
 from datetime import datetime
 from typing import Dict, List, Optional
 from .models import MigrationRequest, MigrationStatus, VolumeMount, TransferMethod
@@ -208,7 +210,7 @@ class MigrationService:
                         request.ssh_user, request.ssh_port
                     )
                 else:  # RSYNC
-                    success = await self.transfer_ops.rsync_transfer(
+                    success = await self.transfer_ops.transfer_via_rsync(
                         source_path, request.target_host, target_path,
                         request.ssh_user, request.ssh_port
                     )
@@ -219,7 +221,27 @@ class MigrationService:
             # Step 9: Generate updated docker-compose file
             await self._update_status(migration_id, "generating", 90, "Generating updated compose file")
             
-            updated_compose = await self.docker_ops.update_compose_paths(compose_data, volume_mapping)
+            # Write compose file to temporary location first
+            temp_compose_file = None
+            try:
+                # Create temporary compose file with original content
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
+                    yaml.dump(compose_data, f, default_flow_style=False, sort_keys=False)
+                    temp_compose_file = f.name
+                
+                # Update the compose file paths
+                success = await self.docker_ops.update_compose_file_paths(temp_compose_file, volume_mapping)
+                if not success:
+                    raise Exception("Failed to update compose file paths")
+                
+                # Read the updated content
+                with open(temp_compose_file, 'r') as f:
+                    updated_compose = f.read()
+                    
+            finally:
+                # Clean up temporary file
+                if temp_compose_file and os.path.exists(temp_compose_file):
+                    os.unlink(temp_compose_file)
             
             # Step 10: Save updated compose file on target
             await self._update_status(migration_id, "finalizing", 95, "Saving updated compose configuration")

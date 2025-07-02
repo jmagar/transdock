@@ -300,14 +300,21 @@ class TransferOperations:
                              ssh_port: int = 22) -> bool:
         """Verify that the transfer was successful by comparing file counts"""
         try:
-            # Count files in source
-            source_count_cmd = ["find", source_path, "-type", "f", "|", "wc", "-l"]
-            returncode, stdout, stderr = await self.run_command(source_count_cmd)
+            # Count files in source - use shell=True to handle pipe
+            source_count_cmd = f"find {SecurityUtils.escape_shell_argument(source_path)} -type f | wc -l"
+            process = await asyncio.create_subprocess_shell(
+                source_count_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            returncode = process.returncode if process.returncode is not None else 1
+            
             if returncode != 0:
-                logger.error(f"Failed to count source files: {stderr}")
+                logger.error(f"Failed to count source files: {stderr.decode()}")
                 return False
             
-            source_count = int(stdout.strip())
+            source_count = int(stdout.decode().strip())
             
             # Count files on target via SSH  
             count_cmd = f"find {SecurityUtils.escape_shell_argument(target_path)} -type f | wc -l"
