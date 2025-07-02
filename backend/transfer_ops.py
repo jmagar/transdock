@@ -3,12 +3,19 @@ import os
 from typing import List, Dict, Tuple, Optional
 import asyncio
 from models import VolumeMount, TransferMethod
+from security_utils import SecurityUtils, SecurityValidationError
 
 logger = logging.getLogger(__name__)
 
 class TransferOperations:
-    def __init__(self):
+    def __init__(self, zfs_ops=None):
         self.temp_mount_base = "/tmp/transdock_mounts"
+        # Inject ZFSOperations to avoid duplication
+        if zfs_ops is None:
+            from zfs_ops import ZFSOperations
+            self.zfs_ops = ZFSOperations()
+        else:
+            self.zfs_ops = zfs_ops
     
     async def run_command(self, cmd: List[str], cwd: Optional[str] = None) -> Tuple[int, str, str]:
         """Run a command asynchronously"""
@@ -20,7 +27,9 @@ class TransferOperations:
                 cwd=cwd
             )
             stdout, stderr = await process.communicate()
-            return process.returncode, stdout.decode(), stderr.decode()
+            # Ensure returncode is never None by defaulting to 1 if it somehow is
+            returncode = process.returncode if process.returncode is not None else 1
+            return returncode, stdout.decode(), stderr.decode()
         except Exception as e:
             logger.error(f"Command failed: {' '.join(cmd)} - {e}")
             return 1, "", str(e)
@@ -28,15 +37,28 @@ class TransferOperations:
     async def create_target_directories(self, target_host: str, directories: List[str],
                                        ssh_user: str = "root", ssh_port: int = 22) -> bool:
         """Create target directories on remote host"""
+        try:
+            # Validate SSH parameters
+            SecurityUtils.validate_hostname(target_host)
+            SecurityUtils.validate_username(ssh_user)
+            SecurityUtils.validate_port(ssh_port)
+        except SecurityValidationError as e:
+            logger.error(f"Security validation failed: {e}")
+            return False
+        
         for directory in directories:
-            cmd = [
-                "ssh", "-p", str(ssh_port), f"{ssh_user}@{target_host}",
-                f"mkdir -p {directory}"
-            ]
-            
-            returncode, _, stderr = await self.run_command(cmd)
-            if returncode != 0:
-                logger.error(f"Failed to create directory {directory} on {target_host}: {stderr}")
+            try:
+                # Validate and sanitize directory path
+                safe_directory = SecurityUtils.sanitize_path(directory)
+                mkdir_cmd = f"mkdir -p {SecurityUtils.escape_shell_argument(safe_directory)}"
+                cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, mkdir_cmd)
+                
+                returncode, _, stderr = await self.run_command(cmd)
+                if returncode != 0:
+                    logger.error(f"Failed to create directory {directory} on {target_host}: {stderr}")
+                    return False
+            except SecurityValidationError as e:
+                logger.error(f"Security validation failed for directory {directory}: {e}")
                 return False
         
         logger.info(f"Created {len(directories)} directories on {target_host}")
@@ -48,20 +70,46 @@ class TransferOperations:
         """Transfer data using ZFS send/receive"""
         logger.info(f"Transferring {snapshot_name} via ZFS send to {target_host}:{target_dataset}")
         
+        # Validate inputs to prevent command injection
+        try:
+            SecurityUtils.validate_hostname(target_host)
+            SecurityUtils.validate_username(ssh_user)
+            SecurityUtils.validate_port(ssh_port)
+            SecurityUtils.validate_dataset_name(target_dataset)
+            
+            # Validate snapshot name format
+            if '@' not in snapshot_name or len(snapshot_name) > 256:
+                raise SecurityValidationError(f"Invalid snapshot name: {snapshot_name}")
+        except SecurityValidationError as e:
+            logger.error(f"Security validation failed: {e}")
+            return False
+        
         # Create parent dataset on target if it doesn't exist
         parent_dataset = "/".join(target_dataset.split("/")[:-1])
         if parent_dataset:
-            create_cmd = [
-                "ssh", "-p", str(ssh_port), f"{ssh_user}@{target_host}",
-                f"zfs create -p {parent_dataset} 2>/dev/null || true"
-            ]
-            await self.run_command(create_cmd)
+            try:
+                zfs_create_cmd = SecurityUtils.validate_zfs_command_args("create", "-p", parent_dataset)
+                create_cmd_str = f"{' '.join(zfs_create_cmd)} 2>/dev/null || true"
+                create_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, create_cmd_str)
+                await self.run_command(create_cmd)
+            except SecurityValidationError as e:
+                logger.warning(f"Failed to validate parent dataset creation command: {e}")
         
-        # Send the snapshot
-        cmd = [
-            "sh", "-c",
-            f"zfs send {snapshot_name} | ssh -p {ssh_port} {ssh_user}@{target_host} 'zfs receive {target_dataset}'"
-        ]
+        # Send the snapshot using secure command construction
+        try:
+            zfs_send_cmd = SecurityUtils.validate_zfs_command_args("send", snapshot_name)
+            zfs_receive_cmd = SecurityUtils.validate_zfs_command_args("receive", target_dataset)
+            
+            receive_cmd_str = " ".join(zfs_receive_cmd)
+            ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, receive_cmd_str)
+            
+            cmd = [
+                "sh", "-c",
+                f"{' '.join(zfs_send_cmd)} | {' '.join(ssh_cmd)}"
+            ]
+        except SecurityValidationError as e:
+            logger.error(f"Security validation failed for ZFS commands: {e}")
+            return False
         
         returncode, stdout, stderr = await self.run_command(cmd)
         
@@ -78,17 +126,28 @@ class TransferOperations:
         """Transfer data using rsync"""
         logger.info(f"Transferring {source_path} via rsync to {target_host}:{target_path}")
         
+        # Validate inputs and sanitize paths
+        try:
+            source_path = SecurityUtils.sanitize_path(source_path)
+            target_path = SecurityUtils.sanitize_path(target_path)
+        except SecurityValidationError as e:
+            logger.error(f"Path validation failed: {e}")
+            return False
+        
         # Ensure target directory exists
         parent_dir = os.path.dirname(target_path)
         if parent_dir:
             await self.create_target_directories(target_host, [parent_dir], ssh_user, ssh_port)
         
-        cmd = [
-            "rsync", "-avzP", "--delete",
-            "-e", f"ssh -p {ssh_port}",
-            f"{source_path}/",
-            f"{ssh_user}@{target_host}:{target_path}/"
-        ]
+        # Build secure rsync command
+        try:
+            cmd = SecurityUtils.build_rsync_command(
+                f"{source_path}/", target_host, ssh_user, ssh_port, f"{target_path}/",
+                additional_args=["--delete"]
+            )
+        except SecurityValidationError as e:
+            logger.error(f"Failed to build secure rsync command: {e}")
+            return False
         
         returncode, stdout, stderr = await self.run_command(cmd)
         
@@ -112,19 +171,46 @@ class TransferOperations:
         # Clone the snapshot to make it accessible
         clone_name = f"{snapshot_name.split('@')[0]}_rsync_clone"
         
-        # Remove existing clone if it exists
-        await self.run_command(["zfs", "destroy", clone_name])
+        # Remove existing clone if it exists (best effort)
+        try:
+            destroy_cmd = SecurityUtils.validate_zfs_command_args("destroy", clone_name)
+            await self.run_command(destroy_cmd)
+        except SecurityValidationError:
+            # Best effort cleanup, continue if validation fails
+            pass
         
-        returncode, _, stderr = await self.run_command(["zfs", "clone", snapshot_name, clone_name])
-        if returncode != 0:
-            logger.error(f"Failed to clone snapshot {snapshot_name}: {stderr}")
+        # Clone the snapshot using secure command construction
+        try:
+            clone_cmd = SecurityUtils.validate_zfs_command_args("clone", snapshot_name, clone_name)
+            returncode, _, stderr = await self.run_command(clone_cmd)
+            if returncode != 0:
+                logger.error(f"Failed to clone snapshot {snapshot_name}: {stderr}")
+                return None
+        except SecurityValidationError as e:
+            logger.error(f"Security validation failed for cloning snapshot: {e}")
             return None
         
-        # Set mountpoint
-        returncode, _, stderr = await self.run_command(["zfs", "set", f"mountpoint={mount_point}", clone_name])
-        if returncode != 0:
-            logger.error(f"Failed to set mountpoint for {clone_name}: {stderr}")
-            await self.run_command(["zfs", "destroy", clone_name])
+        # Set mountpoint using secure command construction
+        try:
+            set_cmd = SecurityUtils.validate_zfs_command_args("set", f"mountpoint={mount_point}", clone_name)
+            returncode, _, stderr = await self.run_command(set_cmd)
+            if returncode != 0:
+                logger.error(f"Failed to set mountpoint for {clone_name}: {stderr}")
+                # Cleanup on failure
+                try:
+                    destroy_cmd = SecurityUtils.validate_zfs_command_args("destroy", clone_name)
+                    await self.run_command(destroy_cmd)
+                except SecurityValidationError:
+                    pass  # Best effort cleanup
+                return None
+        except SecurityValidationError as e:
+            logger.error(f"Security validation failed for setting mountpoint: {e}")
+            # Cleanup on failure
+            try:
+                destroy_cmd = SecurityUtils.validate_zfs_command_args("destroy", clone_name)
+                await self.run_command(destroy_cmd)
+            except SecurityValidationError:
+                pass  # Best effort cleanup
             return None
         
         logger.info(f"Mounted snapshot {snapshot_name} at {mount_point}")
@@ -134,10 +220,15 @@ class TransferOperations:
         """Clean up temporary mount used for rsync"""
         clone_name = f"{snapshot_name.split('@')[0]}_rsync_clone"
         
-        # Destroy the clone
-        returncode, _, stderr = await self.run_command(["zfs", "destroy", clone_name])
-        if returncode != 0:
-            logger.error(f"Failed to destroy clone {clone_name}: {stderr}")
+        # Destroy the clone using secure command construction
+        try:
+            destroy_cmd = SecurityUtils.validate_zfs_command_args("destroy", clone_name)
+            returncode, _, stderr = await self.run_command(destroy_cmd)
+            if returncode != 0:
+                logger.error(f"Failed to destroy clone {clone_name}: {stderr}")
+                return False
+        except SecurityValidationError as e:
+            logger.error(f"Security validation failed for destroying clone: {e}")
             return False
         
         # Remove mount point
@@ -204,26 +295,44 @@ class TransferOperations:
                              ssh_port: int = 22) -> bool:
         """Verify that the transfer was successful by comparing file counts"""
         try:
-            # Count files in source
-            returncode, stdout, _ = await self.run_command([
-                "find", source_path, "-type", "f", "|", "wc", "-l"
-            ])
+            # Validate inputs to prevent command injection
+            SecurityUtils.validate_hostname(target_host)
+            SecurityUtils.validate_username(ssh_user)
+            SecurityUtils.validate_port(ssh_port)
+            source_path = SecurityUtils.sanitize_path(source_path)
+            target_path = SecurityUtils.sanitize_path(target_path)
+        except SecurityValidationError as e:
+            logger.error(f"Security validation failed for transfer verification: {e}")
+            return False
+        
+        try:
+            # Count files in source using secure shell command
+            find_source_cmd = [
+                "sh", "-c", 
+                f"find {SecurityUtils.escape_shell_argument(source_path)} -type f | wc -l"
+            ]
+            returncode, stdout, stderr = await self.run_command(find_source_cmd)
             if returncode != 0:
+                logger.error(f"Failed to count source files: {stderr}")
                 return False
             source_count = int(stdout.strip())
             
-            # Count files in target
-            returncode, stdout, _ = await self.run_command([
-                "ssh", "-p", str(ssh_port), f"{ssh_user}@{target_host}",
-                f"find {target_path} -type f | wc -l"
-            ])
+            # Count files in target using secure SSH command
+            remote_find_cmd = f"find {SecurityUtils.escape_shell_argument(target_path)} -type f | wc -l"
+            ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, remote_find_cmd)
+            
+            returncode, stdout, stderr = await self.run_command(ssh_cmd)
             if returncode != 0:
+                logger.error(f"Failed to count target files: {stderr}")
                 return False
             target_count = int(stdout.strip())
             
             logger.info(f"Transfer verification: source={source_count}, target={target_count}")
             return source_count == target_count
         
+        except ValueError as e:
+            logger.error(f"Failed to parse file counts: {e}")
+            return False
         except Exception as e:
             logger.error(f"Transfer verification failed: {e}")
-            return False 
+            return False
