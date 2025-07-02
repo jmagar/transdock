@@ -97,12 +97,19 @@ class SecurityUtils:
         # Normalize the path after validation
         normalized_path = os.path.normpath(path)
         
-        # If base_path is provided, ensure the path is within it
+        # If base_path is provided, ensure the path is within it using cross-platform approach
         if base_path:
-            # Make paths absolute for reliable comparison
-            abs_base = os.path.abspath(base_path)
-            abs_normalized = os.path.abspath(normalized_path)
-            if not abs_normalized.startswith(abs_base + os.sep) and abs_normalized != abs_base:
+            try:
+                # Make paths absolute for reliable comparison
+                abs_base = os.path.abspath(base_path)
+                abs_normalized = os.path.abspath(normalized_path)
+                
+                # Use os.path.commonpath for robust cross-platform containment check
+                common_path = os.path.commonpath([abs_base, abs_normalized])
+                if common_path != abs_base:
+                    raise SecurityValidationError(f"Path is outside base directory: {path}")
+            except ValueError:
+                # os.path.commonpath raises ValueError if paths are on different drives (Windows)
                 raise SecurityValidationError(f"Path is outside base directory: {path}")
         
         return normalized_path
@@ -137,19 +144,17 @@ class SecurityUtils:
         username = SecurityUtils.validate_username(config.username)
         port = SecurityUtils.validate_port(config.port)
         
-        # Build base command - check for --delete in additional_args to avoid duplication
+        # Build base command 
         cmd = ["rsync", "-avzP"]
         
-        # Track existing flags to avoid duplicates
-        existing_flags = set(cmd)
-        
-        # Add additional arguments if provided
+        # Check if --delete is already in additional_args to avoid duplication
+        has_delete_flag = False
         if config.additional_args:
-            cmd.extend(arg for arg in config.additional_args if arg not in existing_flags)
-            existing_flags.update(config.additional_args)
+            has_delete_flag = "--delete" in config.additional_args
+            cmd.extend(config.additional_args)
         
         # Add --delete if not already present in additional_args
-        if "--delete" not in existing_flags:
+        if not has_delete_flag:
             cmd.append("--delete")
         
         # Add SSH specification

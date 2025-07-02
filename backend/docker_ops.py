@@ -4,7 +4,6 @@ import logging
 import re
 from typing import List, Dict, Optional, Tuple
 import asyncio
-from pathlib import Path
 from .models import VolumeMount
 
 logger = logging.getLogger(__name__)

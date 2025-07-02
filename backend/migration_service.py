@@ -270,6 +270,7 @@ class MigrationService:
             # Store final configuration
             self.active_migrations[migration_id].target_compose_path = compose_target_path
             self.active_migrations[migration_id].volume_mapping = volume_mapping
+            self.active_migrations[migration_id].snapshots = [snapshot_name for snapshot_name, _ in snapshots]
             
             logger.info(f"Migration {migration_id} completed successfully")
             
