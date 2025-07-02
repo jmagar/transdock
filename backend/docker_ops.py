@@ -220,11 +220,75 @@ class DockerOperations:
         return True
     
     async def validate_compose_file(self, compose_file_path: str) -> bool:
-        """Validate that a compose file is syntactically correct"""
+        """Validate that a compose file is properly formatted"""
         try:
-            with open(compose_file_path, 'r') as file:
-                yaml.safe_load(file)
+            await self.parse_compose_file(compose_file_path)
             return True
         except Exception as e:
-            logger.error(f"Compose file validation failed for {compose_file_path}: {e}")
-            return False 
+            logger.error(f"Compose file validation failed: {e}")
+            return False
+
+    async def update_compose_paths(self, compose_data: Dict, volume_mapping: Dict[str, str]) -> str:
+        """Update compose data with new volume paths and return updated compose content"""
+        try:
+            # Create a deep copy of the compose data to avoid modifying the original
+            import copy
+            updated_compose = copy.deepcopy(compose_data)
+            
+            services = updated_compose.get('services', {})
+            
+            for service_name, service_config in services.items():
+                volumes = service_config.get('volumes', [])
+                updated_volumes = []
+                
+                for volume in volumes:
+                    if isinstance(volume, str):
+                        # Handle string format: "host_path:container_path"
+                        if ':' in volume:
+                            parts = volume.split(':')
+                            if len(parts) >= 2:
+                                host_path = parts[0]
+                                container_path = parts[1]
+                                
+                                # Check if this host path needs to be updated
+                                new_host_path = volume_mapping.get(host_path, host_path)
+                                
+                                # Reconstruct the volume string
+                                updated_volume = f"{new_host_path}:{container_path}"
+                                if len(parts) > 2:
+                                    # Include any additional options (like :ro)
+                                    updated_volume += ":" + ":".join(parts[2:])
+                                
+                                updated_volumes.append(updated_volume)
+                            else:
+                                updated_volumes.append(volume)
+                        else:
+                            updated_volumes.append(volume)
+                    
+                    elif isinstance(volume, dict):
+                        # Handle dictionary format
+                        updated_volume = volume.copy()
+                        source = volume.get('source', '')
+                        
+                        if source in volume_mapping:
+                            updated_volume['source'] = volume_mapping[source]
+                        
+                        updated_volumes.append(updated_volume)
+                    
+                    else:
+                        updated_volumes.append(volume)
+                
+                # Update the service volumes
+                if updated_volumes:
+                    service_config['volumes'] = updated_volumes
+            
+            # Convert back to YAML string
+            import yaml
+            updated_yaml = yaml.dump(updated_compose, default_flow_style=False, sort_keys=False)
+            
+            logger.info(f"Updated compose paths in {len(volume_mapping)} volume mappings")
+            return updated_yaml
+            
+        except Exception as e:
+            logger.error(f"Failed to update compose paths: {e}")
+            raise 

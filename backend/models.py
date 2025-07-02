@@ -31,6 +31,9 @@ class MigrationStatus(BaseModel):
     volumes: List[VolumeMount] = []
     transfer_method: Optional[TransferMethod] = None
     error: Optional[str] = None
+    snapshots: List[str] = []
+    target_compose_path: Optional[str] = None
+    volume_mapping: Optional[Dict[str, str]] = None
 
 class MigrationResponse(BaseModel):
     migration_id: str

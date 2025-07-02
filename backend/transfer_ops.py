@@ -300,44 +300,82 @@ class TransferOperations:
                              ssh_port: int = 22) -> bool:
         """Verify that the transfer was successful by comparing file counts"""
         try:
-            # Validate inputs to prevent command injection
-            SecurityUtils.validate_hostname(target_host)
-            SecurityUtils.validate_username(ssh_user)
-            SecurityUtils.validate_port(ssh_port)
-            source_path = SecurityUtils.sanitize_path(source_path)
-            target_path = SecurityUtils.sanitize_path(target_path)
-        except SecurityValidationError as e:
-            logger.error(f"Security validation failed for transfer verification: {e}")
-            return False
-        
-        try:
-            # Count files in source using secure shell command
-            find_source_cmd = [
-                "sh", "-c", 
-                f"find {SecurityUtils.escape_shell_argument(source_path)} -type f | wc -l"
-            ]
-            returncode, stdout, stderr = await self.run_command(find_source_cmd)
+            # Count files in source
+            source_count_cmd = ["find", source_path, "-type", "f", "|", "wc", "-l"]
+            returncode, stdout, stderr = await self.run_command(source_count_cmd)
             if returncode != 0:
                 logger.error(f"Failed to count source files: {stderr}")
                 return False
+            
             source_count = int(stdout.strip())
             
-            # Count files in target using secure SSH command
-            remote_find_cmd = f"find {SecurityUtils.escape_shell_argument(target_path)} -type f | wc -l"
-            ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, remote_find_cmd)
+            # Count files on target via SSH  
+            count_cmd = f"find {SecurityUtils.escape_shell_argument(target_path)} -type f | wc -l"
+            ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, count_cmd)
             
             returncode, stdout, stderr = await self.run_command(ssh_cmd)
             if returncode != 0:
                 logger.error(f"Failed to count target files: {stderr}")
                 return False
+            
             target_count = int(stdout.strip())
             
-            logger.info(f"Transfer verification: source={source_count}, target={target_count}")
-            return source_count == target_count
-        
-        except ValueError as e:
-            logger.error(f"Failed to parse file counts: {e}")
-            return False
+            # Compare counts
+            if source_count == target_count:
+                logger.info(f"Transfer verification successful: {source_count} files")
+                return True
+            else:
+                logger.error(f"Transfer verification failed: {source_count} source files != {target_count} target files")
+                return False
+                
         except Exception as e:
             logger.error(f"Transfer verification failed: {e}")
+            return False
+
+    async def rsync_transfer(self, source_path: str, target_host: str, target_path: str,
+                           ssh_user: str = "root", ssh_port: int = 22) -> bool:
+        """Transfer data using rsync (wrapper around transfer_via_rsync)"""
+        return await self.transfer_via_rsync(source_path, target_host, target_path, ssh_user, ssh_port)
+
+    async def write_remote_file(self, target_host: str, target_file_path: str, content: str,
+                              ssh_user: str = "root", ssh_port: int = 22) -> bool:
+        """Write content to a file on remote host"""
+        try:
+            # Validate inputs
+            SecurityUtils.validate_hostname(target_host)
+            SecurityUtils.validate_username(ssh_user)
+            SecurityUtils.validate_port(ssh_port)
+            target_file_path = SecurityUtils.sanitize_path(target_file_path)
+            
+            # Create target directory if it doesn't exist
+            target_dir = os.path.dirname(target_file_path)
+            if target_dir:
+                mkdir_cmd = f"mkdir -p {SecurityUtils.escape_shell_argument(target_dir)}"
+                ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, mkdir_cmd)
+                returncode, _, stderr = await self.run_command(ssh_cmd)
+                if returncode != 0:
+                    logger.error(f"Failed to create target directory {target_dir}: {stderr}")
+                    return False
+            
+            # Use echo to write content to file via SSH
+            # Escape content for shell
+            escaped_content = SecurityUtils.escape_shell_argument(content)
+            escaped_path = SecurityUtils.escape_shell_argument(target_file_path)
+            
+            write_cmd = f"echo {escaped_content} > {escaped_path}"
+            ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, write_cmd)
+            
+            returncode, _, stderr = await self.run_command(ssh_cmd)
+            if returncode != 0:
+                logger.error(f"Failed to write file {target_file_path}: {stderr}")
+                return False
+            
+            logger.info(f"Successfully wrote file to {target_host}:{target_file_path}")
+            return True
+            
+        except SecurityValidationError as e:
+            logger.error(f"Security validation failed for remote file write: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to write remote file: {e}")
             return False
