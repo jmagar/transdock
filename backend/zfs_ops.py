@@ -1,8 +1,8 @@
 import asyncio
 import logging
 from datetime import datetime
-from typing import Optional, List
-from security_utils import SecurityUtils, SecurityValidationError
+from typing import Optional, List, Tuple
+from .security_utils import SecurityUtils, SecurityValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +12,7 @@ class ZFSOperations:
     def __init__(self):
         pass
     
-    async def run_command(self, cmd):
+    async def run_command(self, cmd: List[str]) -> tuple[int, str, str]:
         """Execute a command and return result"""
         try:
             process = await asyncio.create_subprocess_exec(
@@ -21,11 +21,13 @@ class ZFSOperations:
                 stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await process.communicate()
-            return process.returncode, stdout.decode(), stderr.decode()
+            # Ensure returncode is never None by defaulting to 1 if it somehow is
+            returncode = process.returncode if process.returncode is not None else 1
+            return returncode, stdout.decode(), stderr.decode()
         except Exception as e:
             return 1, "", str(e)
 
-    async def safe_run_zfs_command(self, *args):
+    async def safe_run_zfs_command(self, *args: str) -> tuple[int, str, str]:
         """
         Safely validate and execute a ZFS command with security validation.
         
@@ -47,12 +49,12 @@ class ZFSOperations:
         except SecurityValidationError:
             return 1, "", "Security validation failed"
 
-    async def dataset_exists(self, dataset_name):
+    async def dataset_exists(self, dataset_name: str) -> bool:
         """Check if a ZFS dataset exists"""
         returncode, _, _ = await self.safe_run_zfs_command("list", "-H", dataset_name)
         return returncode == 0
 
-    async def list_datasets(self, pool_name=None):
+    async def list_datasets(self, pool_name: Optional[str] = None) -> List[str]:
         """List ZFS datasets"""
         if pool_name:
             pool_name = SecurityUtils.validate_dataset_name(pool_name)
