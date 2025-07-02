@@ -5,7 +5,7 @@ import re
 from typing import List, Dict, Optional, Tuple
 import asyncio
 from pathlib import Path
-from models import VolumeMount
+from .models import VolumeMount
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,9 @@ class DockerOperations:
                 cwd=cwd
             )
             stdout, stderr = await process.communicate()
-            return process.returncode, stdout.decode(), stderr.decode()
+            # Ensure returncode is never None by defaulting to 1 if it somehow is
+            returncode = process.returncode if process.returncode is not None else 1
+            return returncode, stdout.decode(), stderr.decode()
         except Exception as e:
             logger.error(f"Command failed: {' '.join(cmd)} - {e}")
             return 1, "", str(e)

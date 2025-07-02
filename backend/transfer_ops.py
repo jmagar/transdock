@@ -2,8 +2,8 @@ import logging
 import os
 from typing import List, Dict, Tuple, Optional
 import asyncio
-from models import VolumeMount, TransferMethod
-from security_utils import SecurityUtils, SecurityValidationError
+from .models import VolumeMount, TransferMethod
+from .security_utils import SecurityUtils, SecurityValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +12,7 @@ class TransferOperations:
         self.temp_mount_base = "/tmp/transdock_mounts"
         # Inject ZFSOperations to avoid duplication
         if zfs_ops is None:
-            from zfs_ops import ZFSOperations
+            from .zfs_ops import ZFSOperations
             self.zfs_ops = ZFSOperations()
         else:
             self.zfs_ops = zfs_ops
@@ -159,7 +159,7 @@ class TransferOperations:
         return True
     
     async def mount_snapshot_for_rsync(self, snapshot_name: str) -> Optional[str]:
-        """Mount a ZFS snapshot for rsync transfer"""
+        """Mount a ZFS snapshot for rsync transfer - REFACTORED to use ZFSOperations"""
         mount_point = f"{self.temp_mount_base}/{snapshot_name.replace('/', '_').replace('@', '_')}"
         
         # Create mount point
@@ -217,7 +217,7 @@ class TransferOperations:
         return mount_point
     
     async def cleanup_rsync_mount(self, mount_point: str, snapshot_name: str) -> bool:
-        """Clean up temporary mount used for rsync"""
+        """Clean up temporary mount used for rsync - REFACTORED to use ZFSOperations"""
         clone_name = f"{snapshot_name.split('@')[0]}_rsync_clone"
         
         # Destroy the clone using secure command construction
