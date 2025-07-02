@@ -208,9 +208,8 @@ class SecurityUtils:
     def validate_migration_request(compose_dataset: str, target_host: str,
                                    ssh_user: str, ssh_port: int, target_base_path: str) -> None:
         """Validate all parameters of a migration request."""
-        # Validate compose dataset
-        if not compose_dataset:
-            raise SecurityValidationError("Compose dataset cannot be empty")
+        # Validate compose dataset with proper dataset validation
+        SecurityUtils.validate_dataset_name(compose_dataset)
         
         # Validate target host
         SecurityUtils.validate_hostname(target_host)

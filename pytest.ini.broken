@@ -1,0 +1,66 @@
+[pytest]
+# Pytest configuration for TransDock
+testpaths = tests
+python_files = test_*.py
+python_classes = Test*
+python_functions = test_*
+addopts = 
+    --verbose
+    --tb=short
+    --strict-markers
+    --disable-warnings
+    --cov=backend
+    --cov-report=term-missing
+    --cov-report=html:htmlcov
+    --cov-fail-under=80
+    --asyncio-mode=auto
+
+# Test markers for organizing tests
+markers =
+    unit: Unit tests for individual modules
+    integration: Integration tests for API endpoints
+    security: Security tests for validation and injection prevention
+    slow: Tests that take a long time to run
+    network: Tests that require network connectivity
+    zfs: Tests that require ZFS functionality
+    docker: Tests that require Docker functionality
+    ssh: Tests that require SSH connectivity
+
+# Minimum version requirements
+minversion = 6.0
+
+# Test discovery patterns
+collect_ignore = [
+    "setup.py",
+    ".venv",
+    "build",
+    "dist"
+]
+
+# Async test configuration
+asyncio_mode = auto
+
+# Coverage configuration
+[coverage:run]
+source = backend
+omit = 
+    */tests/*
+    */test_*
+    */__pycache__/*
+    */conftest.py
+
+[coverage:report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    if self.debug:
+    if settings.DEBUG
+    raise AssertionError
+    raise NotImplementedError
+    if 0:
+    if __name__ == .__main__.:
+    class .*\bProtocol\):
+    @(abc\.)?abstractmethod
+
+[coverage:html]
+directory = htmlcov 
