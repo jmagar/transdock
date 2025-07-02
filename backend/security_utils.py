@@ -188,14 +188,31 @@ class SecurityUtils:
         return validated_args
     
     @staticmethod
-    def validate_migration_request(compose_dataset: str, target_host: str, 
+    def create_secure_mount_point(base_path: str, identifier: str) -> str:
+        """Create a secure mount point path."""
+        # Sanitize identifier
+        safe_identifier = re.sub(r'[^a-zA-Z0-9_-]', '_', identifier)
+        
+        # Create path within base directory
+        mount_point = os.path.join(base_path, safe_identifier)
+        
+        # Validate the resulting path
+        return SecurityUtils.sanitize_path(mount_point, base_path)
+    
+    @staticmethod
+    def validate_migration_request(compose_dataset: str, target_host: str,
                                    ssh_user: str, ssh_port: int, target_base_path: str) -> None:
-        """Validate all parameters for a complete migration request."""
-        try:
-            SecurityUtils.validate_dataset_name(compose_dataset)
-            SecurityUtils.validate_hostname(target_host)
-            SecurityUtils.validate_username(ssh_user)
-            SecurityUtils.validate_port(ssh_port)
-            SecurityUtils.sanitize_path(target_base_path)
-        except SecurityValidationError as e:
-            raise SecurityValidationError(f"Migration validation failed: {e}") from e
+        """Validate all parameters of a migration request."""
+        # Validate compose dataset
+        if not compose_dataset:
+            raise SecurityValidationError("Compose dataset cannot be empty")
+        
+        # Validate target host
+        SecurityUtils.validate_hostname(target_host)
+        
+        # Validate SSH credentials
+        SecurityUtils.validate_username(ssh_user)
+        SecurityUtils.validate_port(ssh_port)
+        
+        # Validate target base path
+        SecurityUtils.sanitize_path(target_base_path)

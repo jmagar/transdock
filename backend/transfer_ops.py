@@ -3,7 +3,7 @@ import os
 from typing import List, Dict, Tuple, Optional
 import asyncio
 from .models import VolumeMount, TransferMethod
-from .security_utils import SecurityUtils, SecurityValidationError
+from .security_utils import SecurityUtils, SecurityValidationError, RsyncConfig
 
 logger = logging.getLogger(__name__)
 
@@ -139,12 +139,17 @@ class TransferOperations:
         if parent_dir:
             await self.create_target_directories(target_host, [parent_dir], ssh_user, ssh_port)
         
-        # Build secure rsync command
+        # Build secure rsync command using new RsyncConfig
         try:
-            cmd = SecurityUtils.build_rsync_command(
-                f"{source_path}/", target_host, ssh_user, ssh_port, f"{target_path}/",
+            config = RsyncConfig(
+                source=f"{source_path}/",
+                hostname=target_host,
+                username=ssh_user,
+                port=ssh_port,
+                target=f"{target_path}/",
                 additional_args=["--delete"]
             )
+            cmd = SecurityUtils.build_rsync_command(config)
         except SecurityValidationError as e:
             logger.error(f"Failed to build secure rsync command: {e}")
             return False
