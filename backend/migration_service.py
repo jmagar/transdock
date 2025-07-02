@@ -2,8 +2,6 @@ import asyncio
 import os
 import uuid
 import logging
-import tempfile
-import yaml
 from datetime import datetime
 from typing import Dict, List, Optional
 from .models import MigrationRequest, MigrationStatus, VolumeMount, TransferMethod
@@ -127,9 +125,8 @@ class MigrationService:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             
             # Snapshot the compose dataset
-            if not await self.zfs_ops.is_dataset(compose_dir):
-                if not await self.zfs_ops.create_dataset(compose_dir):
-                    raise Exception(f"Failed to convert {compose_dir} to dataset")
+            if not await self.zfs_ops.is_dataset(compose_dir) and not await self.zfs_ops.create_dataset(compose_dir):
+                raise Exception(f"Failed to convert {compose_dir} to dataset")
             
             compose_snapshot = await self.zfs_ops.create_snapshot(compose_dir, f"migration_{timestamp}")
             snapshots.append((compose_snapshot, compose_dir))
@@ -143,10 +140,9 @@ class MigrationService:
                 )
                 
                 # Check if volume source is a dataset, convert if not
-                if not await self.zfs_ops.is_dataset(volume.source):
-                    if not await self.zfs_ops.create_dataset(volume.source):
-                        logger.warning(f"Failed to convert {volume.source} to dataset, skipping...")
-                        continue
+                if not await self.zfs_ops.is_dataset(volume.source) and not await self.zfs_ops.create_dataset(volume.source):
+                    logger.warning(f"Failed to convert {volume.source} to dataset, skipping...")
+                    continue
                 
                 # Create snapshot
                 volume_snapshot = await self.zfs_ops.create_snapshot(volume.source, f"migration_{timestamp}")
@@ -221,27 +217,7 @@ class MigrationService:
             # Step 9: Generate updated docker-compose file
             await self._update_status(migration_id, "generating", 90, "Generating updated compose file")
             
-            # Write compose file to temporary location first
-            temp_compose_file = None
-            try:
-                # Create temporary compose file with original content
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
-                    yaml.dump(compose_data, f, default_flow_style=False, sort_keys=False)
-                    temp_compose_file = f.name
-                
-                # Update the compose file paths
-                success = await self.docker_ops.update_compose_file_paths(temp_compose_file, volume_mapping)
-                if not success:
-                    raise Exception("Failed to update compose file paths")
-                
-                # Read the updated content
-                with open(temp_compose_file, 'r') as f:
-                    updated_compose = f.read()
-                    
-            finally:
-                # Clean up temporary file
-                if temp_compose_file and os.path.exists(temp_compose_file):
-                    os.unlink(temp_compose_file)
+            updated_compose = await self.docker_ops.update_compose_paths(compose_data, volume_mapping)
             
             # Step 10: Save updated compose file on target
             await self._update_status(migration_id, "finalizing", 95, "Saving updated compose configuration")

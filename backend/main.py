@@ -3,9 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import logging
 import asyncio
+import os
 from typing import List, Optional
-from models import MigrationRequest, MigrationResponse, MigrationStatus
-from migration_service import MigrationService
+from .models import MigrationRequest, MigrationResponse, MigrationStatus
+from .migration_service import MigrationService
 
 # Configure logging
 logging.basicConfig(
@@ -133,7 +134,6 @@ async def list_compose_stacks():
         docker_ops = migration_service.docker_ops
         compose_base = docker_ops.compose_base_path
         
-        import os
         stacks = []
         
         if os.path.exists(compose_base):
@@ -226,7 +226,7 @@ async def system_info():
         
         # Check ZFS
         zfs_ops = migration_service.zfs_ops
-        info["zfs_available"] = await zfs_ops.is_zfs_available()
+        info["zfs_available"] = str(await zfs_ops.is_zfs_available())
         
         return info
     except Exception as e:

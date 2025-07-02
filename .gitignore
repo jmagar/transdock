@@ -1,8 +1,7 @@
 # UV Virtual Environment
-.venv/
+.venv
 venv/
 *.egg-info/
-.venv
 # Python
 __pycache__/
 *.py[cod]

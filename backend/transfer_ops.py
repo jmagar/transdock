@@ -300,6 +300,12 @@ class TransferOperations:
                              ssh_port: int = 22) -> bool:
         """Verify that the transfer was successful by comparing file counts"""
         try:
+            # Validate inputs before using in shell commands
+            SecurityUtils.validate_hostname(target_host)
+            SecurityUtils.validate_username(ssh_user)
+            SecurityUtils.validate_port(ssh_port)
+            source_path = SecurityUtils.sanitize_path(source_path)
+            target_path = SecurityUtils.sanitize_path(target_path)
             # Count files in source - use shell=True to handle pipe
             source_count_cmd = f"find {SecurityUtils.escape_shell_argument(source_path)} -type f | wc -l"
             process = await asyncio.create_subprocess_shell(
