@@ -44,7 +44,14 @@ class ZFSOperations:
                    Returns (1, "", "Security validation failed") on validation error
         """
         try:
-            cmd = SecurityUtils.validate_zfs_command_args(*args)
+            if not args:
+                raise SecurityValidationError("No ZFS command provided")
+            
+            # First argument is the command, rest are arguments
+            command = args[0]
+            command_args = args[1:] if len(args) > 1 else []
+            
+            cmd = SecurityUtils.validate_zfs_command_args(command, *command_args)
             return await self.run_command(cmd)
         except SecurityValidationError:
             return 1, "", "Security validation failed"
