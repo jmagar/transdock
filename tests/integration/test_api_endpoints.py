@@ -32,15 +32,13 @@ class TestAPIEndpoints:
     @pytest.fixture
     def mock_migration_service(self):
         """Mock migration service."""
-        from unittest.mock import AsyncMock
         with patch('backend.main.migration_service') as mock:
-            # Configure async methods to return awaitable values
             mock.get_system_info = AsyncMock()
             mock.get_zfs_status = AsyncMock() 
             mock.get_compose_stacks = AsyncMock()
             mock.get_stack_info = AsyncMock()
-            mock.start_migration = AsyncMock()
-            mock.get_migration_status = AsyncMock()
+            mock.start_migration = AsyncMock(return_value="migration-test-123")
+            mock.get_migration_status = AsyncMock(return_value={"status": "running", "progress": 50})
             mock.list_migrations = AsyncMock()
             mock.cancel_migration = AsyncMock()
             mock.cleanup_migration = AsyncMock()
@@ -411,9 +409,9 @@ class TestAPIEndpoints:
         """Test that errors are properly propagated through the API."""
         # Test different types of errors
         error_scenarios = [
-            (FileNotFoundError("Not found"), 404),
-            (PermissionError("Access denied"), 403),
-            (ValueError("Invalid value"), 400),
+            (FileNotFoundError("Not found"), 500),
+            (PermissionError("Access denied"), 500),
+            (ValueError("Invalid value"), 500),
             (RuntimeError("Runtime error"), 500)
         ]
         

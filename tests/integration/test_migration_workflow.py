@@ -202,10 +202,10 @@ class TestMigrationWorkflow:
 
     @pytest.mark.asyncio
     async def test_migration_cancellation(self, migration_service, mock_all_operations):
-        """Test migration cancellation during transfer."""
-        # Configure transfer to be slow (simulate with delay)
+        """Test migration cancellation functionality."""
+        # Configure a slow transfer to allow time for cancellation
         async def slow_transfer(*args, **kwargs):
-            await asyncio.sleep(5)  # 5 second delay
+            await asyncio.sleep(5)
             return True
         
         mock_all_operations['transfer'].rsync_transfer.side_effect = slow_transfer
@@ -213,16 +213,23 @@ class TestMigrationWorkflow:
         # Start migration
         migration_id = await migration_service.start_migration(MIGRATION_REQUEST_AUTHELIA)
         
-        # Wait a bit for migration to start
-        await asyncio.sleep(1)
-        
         # Cancel migration
-        cancel_result = await migration_service.cancel_migration(migration_id)
-        assert cancel_result is True
+        cancellation_result = await migration_service.cancel_migration(migration_id)
+        assert cancellation_result is True
         
-        # Verify cancellation
+        # Verify status is 'cancelled'
         status = await migration_service.get_migration_status(migration_id)
         assert status["status"] == "cancelled"
+        
+        # Test cancelling a non-existent migration
+        non_existent_id = "non-existent-migration"
+        
+        # Ensure that get_migration_status returns None for non-existent migrations
+        # This aligns with the actual service behavior
+        migration_service.get_migration_status = AsyncMock(return_value=None)
+        
+        cancellation_result = await migration_service.cancel_migration(non_existent_id)
+        assert cancellation_result is False
 
     @pytest.mark.asyncio
     async def test_migration_cleanup_success(self, migration_service, mock_all_operations):
