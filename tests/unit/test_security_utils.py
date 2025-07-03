@@ -66,15 +66,19 @@ class TestSecurityUtils:
 
     def test_sanitize_path_valid(self):
         """Test path sanitization with valid paths."""
-        valid_paths = [
-            "/home/user/docker",
-            "/mnt/cache/compose", 
-            "/opt/docker/stacks",
-            "relative/path"
-        ]
+        # Test relative paths (should work without allow_absolute)
+        relative_paths = ["relative/path", "data/files", "config"]
         
-        for path in valid_paths:
+        for path in relative_paths:
             result = SecurityUtils.sanitize_path(path)
+            assert result is not None
+            assert ".." not in result
+        
+        # Test absolute paths (require allow_absolute=True)
+        absolute_paths = ["/home/user/docker", "/mnt/cache/compose", "/opt/docker/stacks"]
+        
+        for path in absolute_paths:
+            result = SecurityUtils.sanitize_path(path, allow_absolute=True)
             assert result is not None
             assert ".." not in result
 

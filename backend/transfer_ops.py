@@ -49,7 +49,7 @@ class TransferOperations:
         for directory in directories:
             try:
                 # Validate and sanitize directory path
-                safe_directory = SecurityUtils.sanitize_path(directory)
+                safe_directory = SecurityUtils.sanitize_path(directory, allow_absolute=True)
                 mkdir_cmd = f"mkdir -p {SecurityUtils.escape_shell_argument(safe_directory)}"
                 cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, mkdir_cmd)
                 
@@ -128,8 +128,8 @@ class TransferOperations:
         
         # Validate inputs and sanitize paths
         try:
-            source_path = SecurityUtils.sanitize_path(source_path)
-            target_path = SecurityUtils.sanitize_path(target_path)
+            source_path = SecurityUtils.sanitize_path(source_path, allow_absolute=True)
+            target_path = SecurityUtils.sanitize_path(target_path, allow_absolute=True)
         except SecurityValidationError as e:
             logger.error(f"Path validation failed: {e}")
             return False
@@ -304,8 +304,8 @@ class TransferOperations:
             SecurityUtils.validate_hostname(target_host)
             SecurityUtils.validate_username(ssh_user)
             SecurityUtils.validate_port(ssh_port)
-            source_path = SecurityUtils.sanitize_path(source_path)
-            target_path = SecurityUtils.sanitize_path(target_path)
+            source_path = SecurityUtils.sanitize_path(source_path, allow_absolute=True)
+            target_path = SecurityUtils.sanitize_path(target_path, allow_absolute=True)
             # Count files in source - use shell=True to handle pipe
             source_count_cmd = f"find {SecurityUtils.escape_shell_argument(source_path)} -type f | wc -l"
             process = await asyncio.create_subprocess_shell(
@@ -358,7 +358,7 @@ class TransferOperations:
             SecurityUtils.validate_hostname(target_host)
             SecurityUtils.validate_username(ssh_user)
             SecurityUtils.validate_port(ssh_port)
-            target_file_path = SecurityUtils.sanitize_path(target_file_path)
+            target_file_path = SecurityUtils.sanitize_path(target_file_path, allow_absolute=True)
             
             # Create target directory if it doesn't exist
             target_dir = os.path.dirname(target_file_path)

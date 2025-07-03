@@ -1,451 +1,137 @@
 """
-Unit Tests for Transfer Operations Module
+Unit Tests for Transfer Operations Module (v2)
 
-This module contains tests for Transfer operations with mocked system calls.
+This module contains updated tests for Transfer operations, aligned with the
+refactored TransferOperations class.
 """
 
 import pytest
-import asyncio
-from unittest.mock import AsyncMock, patch, Mock
-from backend.transfer_ops import TransferOperations, TransferMethod
-from backend.security_utils import RsyncConfig
-from tests.fixtures.test_data import MOCK_COMMAND_OUTPUTS
+from unittest.mock import patch, AsyncMock
+from backend.transfer_ops import TransferOperations
+from backend.models import VolumeMount, TransferMethod
 
+@pytest.fixture
+def transfer_ops(mocker):
+    """Create a TransferOperations instance with mocked dependencies."""
+    ops = TransferOperations()
+    # Mock the zfs_ops dependency which is created in the constructor
+    ops.zfs_ops = mocker.AsyncMock()
+    return ops
 
 class TestTransferOperations:
-    """Test suite for Transfer operations."""
-
-    @pytest.fixture
-    def transfer_ops(self):
-        """Create Transfer operations instance."""
-        return TransferOperations()
+    @pytest.mark.asyncio
+    async def test_create_target_directories_success(self, transfer_ops, mocker):
+        """Test successful creation of directories on a remote host."""
+        mocker.patch.object(transfer_ops, 'run_command', return_value=(0, "", ""))
+        mocker.patch('backend.transfer_ops.SecurityUtils.build_ssh_command', return_value=["ssh", "mkdir"])
+        
+        result = await transfer_ops.create_target_directories("host", ["/path/one", "/path/two"])
+        assert result is True
+        assert transfer_ops.run_command.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_test_ssh_connection_success(self, transfer_ops, mock_subprocess):
-        """Test successful SSH connection test."""
-        mock_subprocess.return_value.returncode = 0
-        mock_subprocess.return_value.stdout = MOCK_COMMAND_OUTPUTS['ssh_test']
+    async def test_transfer_via_zfs_send_success(self, transfer_ops, mocker):
+        """Test successful transfer using ZFS send."""
+        mocker.patch.object(transfer_ops, 'run_command', return_value=(0, "", ""))
+        mocker.patch('backend.transfer_ops.SecurityUtils.build_ssh_command', return_value=["ssh", "zfs", "receive"])
         
-        result = await transfer_ops.test_ssh_connection(
-            hostname="192.168.1.100",
-            username="root", 
-            port=22
-        )
-        
+        result = await transfer_ops.transfer_via_zfs_send("pool/data@snap", "host", "tank/data")
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_test_ssh_connection_failure(self, transfer_ops, mock_subprocess):
-        """Test failed SSH connection test."""
-        mock_subprocess.return_value.returncode = 1
-        mock_subprocess.return_value.stderr = "Connection refused"
+    async def test_transfer_via_rsync_success(self, transfer_ops, mocker):
+        """Test successful transfer using rsync."""
+        mocker.patch.object(transfer_ops, 'create_target_directories', return_value=True)
+        mocker.patch.object(transfer_ops, 'run_command', return_value=(0, "", ""))
+        mocker.patch('backend.transfer_ops.SecurityUtils.build_rsync_command', return_value=["rsync"])
         
-        result = await transfer_ops.test_ssh_connection(
-            hostname="192.168.1.100",
-            username="root",
-            port=22
-        )
-        
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_test_ssh_connection_timeout(self, transfer_ops):
-        """Test SSH connection timeout."""
-        with patch('asyncio.create_subprocess_exec') as mock_create:
-            # Mock a process that times out
-            mock_process = Mock()
-            mock_process.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
-            mock_process.returncode = None
-            mock_create.return_value = mock_process
-            
-            result = await transfer_ops.test_ssh_connection(
-                hostname="192.168.1.100",
-                username="root",
-                port=22
-            )
-            
-            assert result is False
-
-    @pytest.mark.asyncio
-    async def test_rsync_transfer_success(self, transfer_ops, mock_subprocess):
-        """Test successful rsync transfer."""
-        mock_subprocess.return_value.returncode = 0
-        mock_subprocess.return_value.stdout = MOCK_COMMAND_OUTPUTS['rsync_test']
-        
-        config = RsyncConfig(
-            source="/mnt/cache/compose/authelia",
-            hostname="192.168.1.100",
-            username="root",
-            port=22,
-            target="/home/user/docker/authelia"
-        )
-        
-        result = await transfer_ops.rsync_transfer(config)
+        result = await transfer_ops.transfer_via_rsync("/src/path", "host", "/dest/path")
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_rsync_transfer_failure(self, transfer_ops, mock_subprocess):
-        """Test failed rsync transfer."""
-        mock_subprocess.return_value.returncode = 1
-        mock_subprocess.return_value.stderr = "rsync: connection unexpectedly closed"
+    async def test_mount_snapshot_for_rsync(self, transfer_ops, mocker):
+        """Test mounting a snapshot for rsync transfer."""
+        mocker.patch.object(transfer_ops, 'run_command', return_value=(0, "", ""))
         
-        config = RsyncConfig(
-            source="/mnt/cache/compose/authelia",
-            hostname="192.168.1.100",
-            username="root", 
-            port=22,
-            target="/home/user/docker/authelia"
-        )
-        
-        result = await transfer_ops.rsync_transfer(config)
-        assert result is False
+        mount_point = await transfer_ops.mount_snapshot_for_rsync("pool/data@snap")
+        assert mount_point is not None
+        assert "pool_data_snap" in mount_point
 
     @pytest.mark.asyncio
-    async def test_rsync_transfer_with_additional_args(self, transfer_ops, mock_subprocess):
-        """Test rsync transfer with additional arguments."""
-        mock_subprocess.return_value.returncode = 0
+    async def test_cleanup_rsync_mount(self, transfer_ops, mocker):
+        """Test cleaning up a temporary rsync mount."""
+        mocker.patch.object(transfer_ops, 'run_command', return_value=(0, "", ""))
         
-        config = RsyncConfig(
-            source="/mnt/cache/compose/authelia",
-            hostname="192.168.1.100",
-            username="root",
-            port=22,
-            target="/home/user/docker/authelia",
-            additional_args=["--dry-run", "--verbose"]
-        )
-        
-        result = await transfer_ops.rsync_transfer(config)
-        assert result is True
-        
-        # Verify additional args were included
-        args, kwargs = mock_subprocess.call_args
-        assert "--dry-run" in args[0]
-        assert "--verbose" in args[0]
-
-    @pytest.mark.asyncio
-    async def test_zfs_send_transfer_success(self, transfer_ops, mock_subprocess):
-        """Test successful ZFS send transfer."""
-        mock_subprocess.return_value.returncode = 0
-        mock_subprocess.return_value.stdout = MOCK_COMMAND_OUTPUTS['zfs_send_test']
-        
-        result = await transfer_ops.zfs_send_transfer(
-            snapshot="cache/compose/authelia@migration-123",
-            target_host="192.168.1.100", 
-            ssh_user="root",
-            target_dataset="tank/compose/authelia"
-        )
-        
+        result = await transfer_ops.cleanup_rsync_mount("/tmp/mount", "pool/data@snap")
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_zfs_send_transfer_failure(self, transfer_ops, mock_subprocess):
-        """Test failed ZFS send transfer."""
-        mock_subprocess.return_value.returncode = 1
-        mock_subprocess.return_value.stderr = "cannot send snapshot: no such dataset"
+    async def test_transfer_volume_data_zfs(self, transfer_ops, mocker):
+        """Test transferring a volume using ZFS send."""
+        mocker.patch.object(transfer_ops, 'transfer_via_zfs_send', return_value=True)
+        volume = VolumeMount(source="/mnt/cache/appdata/test", target="/app/data")
         
-        result = await transfer_ops.zfs_send_transfer(
-            snapshot="cache/compose/nonexistent@migration-123",
-            target_host="192.168.1.100",
-            ssh_user="root", 
-            target_dataset="tank/compose/nonexistent"
+        result = await transfer_ops.transfer_volume_data(
+            volume, "pool/data@snap", "host", "/tank/data", TransferMethod.ZFS_SEND
         )
-        
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_zfs_send_incremental_transfer(self, transfer_ops, mock_subprocess):
-        """Test incremental ZFS send transfer."""
-        mock_subprocess.return_value.returncode = 0
-        mock_subprocess.return_value.stdout = "incremental stream"
-        
-        result = await transfer_ops.zfs_send_transfer(
-            snapshot="cache/compose/authelia@migration-124",
-            target_host="192.168.1.100",
-            ssh_user="root",
-            target_dataset="tank/compose/authelia", 
-            incremental_base="cache/compose/authelia@migration-123"
-        )
-        
         assert result is True
-        
-        # Verify incremental flag was used
-        args, kwargs = mock_subprocess.call_args
-        command_str = " ".join(args[0])
-        assert "-i" in args[0] or "--incremental" in command_str
+        transfer_ops.transfer_via_zfs_send.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_determine_transfer_method_zfs_available(self, transfer_ops):
-        """Test transfer method determination when ZFS is available on both ends."""
-        with patch.object(transfer_ops, '_check_remote_zfs_support', return_value=True):
-            method = await transfer_ops.determine_transfer_method(
-                source_has_zfs=True,
-                target_host="192.168.1.100",
-                ssh_user="root"
-            )
-            
-            assert method == TransferMethod.ZFS_SEND
+    async def test_transfer_volume_data_rsync(self, transfer_ops, mocker):
+        """Test transferring a volume using rsync."""
+        mocker.patch.object(transfer_ops, 'mount_snapshot_for_rsync', return_value="/tmp/mount")
+        mocker.patch.object(transfer_ops, 'transfer_via_rsync', return_value=True)
+        mocker.patch.object(transfer_ops, 'cleanup_rsync_mount', return_value=True)
+        volume = VolumeMount(source="/mnt/cache/appdata/test", target="/app/data")
 
-    @pytest.mark.asyncio
-    async def test_determine_transfer_method_no_zfs(self, transfer_ops):
-        """Test transfer method determination when ZFS is not available."""
-        with patch.object(transfer_ops, '_check_remote_zfs_support', return_value=False):
-            method = await transfer_ops.determine_transfer_method(
-                source_has_zfs=False,
-                target_host="192.168.1.100",
-                ssh_user="root"
-            )
-            
-            assert method == TransferMethod.RSYNC
-
-    @pytest.mark.asyncio
-    async def test_determine_transfer_method_force_rsync(self, transfer_ops):
-        """Test transfer method determination when forced to use rsync."""
-        method = await transfer_ops.determine_transfer_method(
-            source_has_zfs=True,
-            target_host="192.168.1.100",
-            ssh_user="root",
-            force_rsync=True
+        result = await transfer_ops.transfer_volume_data(
+            volume, "pool/data@snap", "host", "/dest/data", TransferMethod.RSYNC
         )
-        
-        assert method == TransferMethod.RSYNC
-
-    @pytest.mark.asyncio
-    async def test_check_remote_zfs_support_available(self, transfer_ops, mock_subprocess):
-        """Test checking remote ZFS support when available."""
-        mock_subprocess.return_value.returncode = 0
-        mock_subprocess.return_value.stdout = "zfs-2.1.5"
-        
-        result = await transfer_ops._check_remote_zfs_support(
-            hostname="192.168.1.100",
-            username="root"
-        )
-        
         assert result is True
+        transfer_ops.mount_snapshot_for_rsync.assert_called_once()
+        transfer_ops.transfer_via_rsync.assert_called_once()
+        transfer_ops.cleanup_rsync_mount.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_check_remote_zfs_support_not_available(self, transfer_ops, mock_subprocess):
-        """Test checking remote ZFS support when not available."""
-        mock_subprocess.return_value.returncode = 1
-        mock_subprocess.return_value.stderr = "command not found"
-        
-        result = await transfer_ops._check_remote_zfs_support(
-            hostname="192.168.1.100",
-            username="root"
-        )
-        
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_create_remote_directory_success(self, transfer_ops, mock_subprocess):
-        """Test successful remote directory creation."""
-        mock_subprocess.return_value.returncode = 0
-        
-        result = await transfer_ops.create_remote_directory(
-            hostname="192.168.1.100",
-            username="root",
-            directory="/home/user/docker/authelia"
-        )
-        
-        assert result is True
-        
-        # Verify mkdir command was called
-        args, kwargs = mock_subprocess.call_args
-        assert "mkdir" in args[0]
-        assert "-p" in args[0]  # Should create parent directories
-
-    @pytest.mark.asyncio
-    async def test_create_remote_directory_failure(self, transfer_ops, mock_subprocess):
-        """Test failed remote directory creation."""
-        mock_subprocess.return_value.returncode = 1
-        mock_subprocess.return_value.stderr = "Permission denied"
-        
-        result = await transfer_ops.create_remote_directory(
-            hostname="192.168.1.100",
-            username="user",
-            directory="/root/restricted"
-        )
-        
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_cleanup_remote_snapshots_success(self, transfer_ops, mock_subprocess):
-        """Test successful remote snapshot cleanup."""
-        mock_subprocess.return_value.returncode = 0
-        
-        result = await transfer_ops.cleanup_remote_snapshots(
-            hostname="192.168.1.100",
-            username="root",
-            snapshots=["tank/compose/authelia@migration-123"]
-        )
-        
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_cleanup_remote_snapshots_failure(self, transfer_ops, mock_subprocess):
-        """Test failed remote snapshot cleanup."""
-        mock_subprocess.return_value.returncode = 1
-        mock_subprocess.return_value.stderr = "snapshot does not exist"
-        
-        result = await transfer_ops.cleanup_remote_snapshots(
-            hostname="192.168.1.100", 
-            username="root",
-            snapshots=["tank/compose/nonexistent@migration-123"]
-        )
-        
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_get_transfer_progress_rsync(self, transfer_ops):
-        """Test getting transfer progress from rsync output."""
-        rsync_output = """
-        building file list ... done
-        file1.txt
-             1,234 bytes  received
-        file2.txt
-             5,678 bytes  received
-        
-        sent 1,234 bytes  received 6,912 bytes  total size 8,146
-        """
-        
-        progress = transfer_ops._parse_rsync_progress(rsync_output)
-        assert progress >= 0
-        assert progress <= 100
-
-    @pytest.mark.asyncio
-    async def test_get_transfer_progress_zfs_send(self, transfer_ops):
-        """Test getting transfer progress from ZFS send output."""
-        zfs_output = MOCK_COMMAND_OUTPUTS['zfs_send_test']
-        
-        progress = transfer_ops._parse_zfs_progress(zfs_output)
-        assert progress >= 0
-        assert progress <= 100
-
-    @pytest.mark.asyncio
-    async def test_secure_transfer_validation(self, transfer_ops):
-        """Test security validation in transfer operations."""
-        # Test with malicious hostname
-        with pytest.raises(Exception):
-            await transfer_ops.test_ssh_connection(
-                hostname="host; rm -rf /",
-                username="root",
-                port=22
-            )
-        
-        # Test with malicious username
-        with pytest.raises(Exception):
-            await transfer_ops.test_ssh_connection(
-                hostname="192.168.1.100",
-                username="user; rm -rf /",
-                port=22
-            )
-
-    @pytest.mark.ssh
-    async def test_integration_ssh_and_rsync(self, transfer_ops, mock_subprocess):
-        """Integration test for SSH connection and rsync transfer."""
-        mock_subprocess.return_value.returncode = 0
-        mock_subprocess.return_value.stdout = "success"
-        
-        # Test SSH connection first
-        ssh_result = await transfer_ops.test_ssh_connection(
-            hostname="192.168.1.100",
-            username="root",
-            port=22
-        )
-        assert ssh_result is True
-        
-        # Then test rsync transfer
-        config = RsyncConfig(
-            source="/test/source",
-            hostname="192.168.1.100",
-            username="root",
-            port=22,
-            target="/test/target"
-        )
-        
-        rsync_result = await transfer_ops.rsync_transfer(config)
-        assert rsync_result is True
-        
-        # Verify both operations were called
-        assert mock_subprocess.call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_concurrent_transfer_operations(self, transfer_ops, mock_subprocess):
-        """Test concurrent transfer operations."""
-        mock_subprocess.return_value.returncode = 0
-        mock_subprocess.return_value.stdout = "success"
-        
-        # Run multiple SSH connection tests concurrently
-        tasks = [
-            transfer_ops.test_ssh_connection(f"192.168.1.{100+i}", "root", 22)
-            for i in range(3)
+    async def test_create_volume_mapping(self, transfer_ops):
+        """Test the creation of a volume mapping."""
+        volumes = [
+            VolumeMount(source="/mnt/cache/appdata/nginx", target="/app/nginx"),
+            VolumeMount(source="/mnt/cache/compose/nginx", target="/etc/nginx")
         ]
-        
-        results = await asyncio.gather(*tasks)
-        
-        # All should succeed
-        assert all(result is True for result in results)
-        assert mock_subprocess.call_count == 3
+        mapping = await transfer_ops.create_volume_mapping(volumes, "/new/base")
+        assert mapping["/mnt/cache/appdata/nginx"] == "/new/base/appdata/nginx"
+        assert mapping["/mnt/cache/compose/nginx"] == "/new/base/compose/nginx"
 
     @pytest.mark.asyncio
-    async def test_error_recovery_retry_mechanism(self, transfer_ops, mock_subprocess):
-        """Test error recovery and retry mechanisms."""
-        # Mock first call to fail, second to succeed
-        mock_subprocess.side_effect = [
-            Mock(returncode=1, stderr="temporary failure"),
-            Mock(returncode=0, stdout="success")
-        ]
-        
-        # This should retry on failure (implementation dependent)
-        result = await transfer_ops.test_ssh_connection(
-            hostname="192.168.1.100",
-            username="root",
-            port=22
-        )
-        
-        # Depending on implementation, this might succeed after retry
-        # For now, we just test that the first call failed
-        assert mock_subprocess.call_count >= 1
+    async def test_verify_transfer_success(self, transfer_ops, mocker):
+        """Test successful transfer verification."""
+        # This mock is for the *local* file count
+        mock_shell = mocker.patch('asyncio.create_subprocess_shell', new_callable=AsyncMock)
+        mock_shell.return_value.communicate.return_value = (b'10\n', b'')
+        mock_shell.return_value.returncode = 0
 
-    @pytest.mark.asyncio
-    async def test_bandwidth_limiting_rsync(self, transfer_ops, mock_subprocess):
-        """Test bandwidth limiting in rsync transfers."""
-        mock_subprocess.return_value.returncode = 0
+        # This mock is for the *remote* file count via run_command
+        mocker.patch.object(transfer_ops, 'run_command', return_value=(0, "10\n", ""))
         
-        config = RsyncConfig(
-            source="/test/source",
-            hostname="192.168.1.100", 
-            username="root",
-            port=22,
-            target="/test/target",
-            additional_args=["--bwlimit=1000"]  # Limit to 1MB/s
-        )
-        
-        result = await transfer_ops.rsync_transfer(config)
+        result = await transfer_ops.verify_transfer("/src", "host", "/dest")
         assert result is True
-        
-        # Verify bandwidth limit was included
-        args, kwargs = mock_subprocess.call_args
-        assert "--bwlimit=1000" in args[0]
 
     @pytest.mark.asyncio
-    async def test_transfer_with_progress_callback(self, transfer_ops, mock_subprocess):
-        """Test transfer operations with progress callbacks."""
-        mock_subprocess.return_value.returncode = 0
-        mock_subprocess.return_value.stdout = MOCK_COMMAND_OUTPUTS['rsync_test']
+    async def test_verify_transfer_failure(self, transfer_ops, mocker):
+        """Test failed transfer verification (mismatched counts)."""
+        mocker.patch('asyncio.create_subprocess_shell', new_callable=AsyncMock)
+        mocker.patch.object(transfer_ops, 'run_command', side_effect=[(0, "10\n", ""), (0, "9\n", "")])
+
+        result = await transfer_ops.verify_transfer("/src", "host", "/dest")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_write_remote_file_success(self, transfer_ops, mocker):
+        """Test writing a file to a remote host successfully."""
+        mocker.patch.object(transfer_ops, 'run_command', return_value=(0, "", ""))
+        mocker.patch('backend.transfer_ops.SecurityUtils.build_ssh_command', return_value=["ssh", "echo"])
         
-        progress_updates = []
-        
-        def progress_callback(percent):
-            progress_updates.append(percent)
-        
-        config = RsyncConfig(
-            source="/test/source",
-            hostname="192.168.1.100",
-            username="root",
-            port=22,
-            target="/test/target"
-        )
-        
-        # This would depend on the actual implementation having progress callback support
-        result = await transfer_ops.rsync_transfer(config)
+        result = await transfer_ops.write_remote_file("host", "/path/to/file", "content")
         assert result is True 

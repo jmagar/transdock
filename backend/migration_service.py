@@ -3,7 +3,7 @@ import os
 import uuid
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from .models import MigrationRequest, MigrationStatus, VolumeMount, TransferMethod
 from .zfs_ops import ZFSOperations
 from .docker_ops import DockerOperations
@@ -172,7 +172,8 @@ class MigrationService:
             # Safely create compose target path to prevent path traversal
             compose_basename = os.path.basename(compose_dir)
             compose_target_path = SecurityUtils.sanitize_path(
-                os.path.join(request.target_base_path, "compose", compose_basename)
+                os.path.join(request.target_base_path, "compose", compose_basename),
+                allow_absolute=True
             )
             
             # Add compose directory to mapping
@@ -254,6 +255,23 @@ class MigrationService:
             await self._update_error(migration_id, str(e))
             logger.exception(f"Migration {migration_id} failed")
     
+    async def cancel_migration(self, migration_id: str) -> bool:
+        """Cancel a running migration"""
+        if migration_id not in self.active_migrations:
+            raise KeyError("Migration not found")
+        
+        status = self.active_migrations[migration_id]
+        
+        # Only allow cancellation of running migrations
+        if status.status in ["completed", "failed", "cancelled"]:
+            return False
+        
+        # Update status to cancelled
+        await self._update_status(migration_id, "cancelled", status.progress, "Migration cancelled by user")
+        
+        logger.info(f"Cancelled migration {migration_id}")
+        return True
+
     async def cleanup_migration(self, migration_id: str) -> bool:
         """Clean up migration resources"""
         if migration_id not in self.active_migrations:
@@ -271,3 +289,178 @@ class MigrationService:
         
         logger.info(f"Cleaned up migration {migration_id}")
         return True
+
+    async def get_system_info(self) -> Dict[str, Any]:
+        """Get system information relevant to migrations"""
+        import platform
+        import subprocess
+        from typing import Union
+        
+        # Basic system info - using Union type for mixed value types
+        info: Dict[str, Union[str, bool, None]] = {
+            "hostname": platform.node(),
+            "platform": platform.platform(),
+            "architecture": platform.architecture()[0]
+        }
+        
+        # Check Docker status safely
+        try:
+            result = subprocess.run(["docker", "version", "--format", "{{.Server.Version}}"], 
+                                    capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                info["docker_version"] = result.stdout.strip()
+            else:
+                info["docker_version"] = "unavailable"
+        except Exception:
+            info["docker_version"] = "unavailable"
+        
+        # Check ZFS status safely
+        try:
+            zfs_available = await self.zfs_ops.is_zfs_available()
+            info["zfs_available"] = zfs_available
+            if zfs_available:
+                # Get ZFS version if available
+                try:
+                    validated_cmd = SecurityUtils.validate_zfs_command_args("version")
+                    returncode, stdout, stderr = await self.zfs_ops.run_command(validated_cmd)
+                    if returncode == 0 and stdout:
+                        # Extract version from first line
+                        first_line = stdout.strip().split('\n')[0]
+                        if 'zfs-' in first_line:
+                            info["zfs_version"] = first_line.split('zfs-')[1].split()[0]
+                        else:
+                            info["zfs_version"] = "unknown"
+                    else:
+                        info["zfs_version"] = "unknown"
+                except Exception:
+                    info["zfs_version"] = "unknown"
+            else:
+                info["zfs_version"] = None
+        except Exception:
+            info["zfs_available"] = False
+            info["zfs_version"] = None
+        
+        # Add configuration paths
+        info["compose_base"] = self.docker_ops.compose_base_path
+        info["appdata_base"] = self.docker_ops.appdata_base_path
+        info["zfs_pool"] = "cache"  # Default ZFS pool name for Unraid
+        
+        return info
+
+    async def get_zfs_status(self) -> Dict[str, Any]:
+        """Get detailed ZFS status information"""
+        try:
+            is_available = await self.zfs_ops.is_zfs_available()
+            
+            if not is_available:
+                return {
+                    "available": False,
+                    "version": None,
+                    "pools": []
+                }
+            
+            # Get ZFS version
+            version = None
+            try:
+                validated_cmd = SecurityUtils.validate_zfs_command_args("version")
+                returncode, stdout, stderr = await self.zfs_ops.run_command(validated_cmd)
+                if returncode == 0 and stdout:
+                    first_line = stdout.strip().split('\n')[0]
+                    if 'zfs-' in first_line:
+                        version = first_line.split('zfs-')[1].split()[0]
+            except Exception:
+                version = "unknown"
+            
+            # Get pool list
+            pools = []
+            try:
+                validated_cmd = SecurityUtils.validate_zfs_command_args("list", "-H", "-o", "name", "-t", "filesystem")
+                returncode, stdout, stderr = await self.zfs_ops.run_command(validated_cmd)
+                if returncode == 0:
+                    for line in stdout.strip().split('\n'):
+                        if line.strip() and '/' not in line:  # Only root pools
+                            pools.append(line.strip())
+            except Exception:
+                pools = []
+            
+            return {
+                "available": True,
+                "version": version,
+                "pools": pools
+            }
+        except Exception:
+            return {
+                "available": False,
+                "version": None,
+                "pools": []
+            }
+
+    async def get_compose_stacks(self) -> List[Dict[str, str]]:
+        """Get list of available Docker Compose stacks"""
+        try:
+            stacks = []
+            compose_base = self.docker_ops.compose_base_path
+            
+            # Validate base path for security
+            validated_base = SecurityUtils.sanitize_path(compose_base, allow_absolute=True)
+            
+            if os.path.exists(validated_base):
+                for item in os.listdir(validated_base):
+                    # Validate each stack name
+                    try:
+                        # Basic validation for stack names  
+                        if not item or len(item) > 64:
+                            continue
+                        if not str(item).replace('-', '').replace('_', '').replace('.', '').isalnum():
+                            continue
+                            
+                        stack_path = SecurityUtils.sanitize_path(os.path.join(validated_base, item), validated_base)
+                        
+                        if os.path.isdir(stack_path):
+                            compose_file = await self.docker_ops.find_compose_file(stack_path)
+                            if compose_file:
+                                stacks.append({
+                                    "name": item,
+                                    "compose_file": compose_file
+                                })
+                    except SecurityValidationError:
+                        # Skip invalid stack names silently
+                        continue
+            
+            return stacks
+        except Exception:
+            return []
+
+    async def get_stack_info(self, stack_name: str) -> Dict[str, Any]:
+        """Get detailed information about a specific compose stack"""
+        # Validate stack name for security
+        if not stack_name or len(stack_name) > 64:
+            raise ValueError("Invalid stack name length")
+        if not str(stack_name).replace('-', '').replace('_', '').replace('.', '').isalnum():
+            raise ValueError("Stack name contains invalid characters")
+        
+        compose_base = SecurityUtils.sanitize_path(self.docker_ops.compose_base_path, allow_absolute=True)
+        stack_path = SecurityUtils.sanitize_path(os.path.join(compose_base, stack_name), compose_base)
+        
+        if not os.path.exists(stack_path):
+            raise FileNotFoundError("Compose stack not found")
+        
+        compose_file = await self.docker_ops.find_compose_file(stack_path)
+        if not compose_file:
+            raise FileNotFoundError("No compose file found in stack")
+        
+        compose_data = await self.docker_ops.parse_compose_file(compose_file)
+        volumes = await self.docker_ops.extract_volume_mounts(compose_data)
+        
+        # Check if volumes are datasets
+        for volume in volumes:
+            volume.is_dataset = await self.zfs_ops.is_dataset(volume.source)
+            if volume.is_dataset:
+                volume.dataset_path = await self.zfs_ops.get_dataset_name(volume.source)
+        
+        return {
+            "name": stack_name,
+            "compose_file": compose_file,
+            "volumes": [{"source": v.source, "target": v.target, "is_dataset": v.is_dataset} for v in volumes],
+            "services": list(compose_data.get('services', {}).keys())
+        }

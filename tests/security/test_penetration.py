@@ -43,7 +43,7 @@ class TestPenetrationSecurity:
                 "ssh_port": 22
             }
             
-            response = client.post("/migrations", json=malicious_request)
+            response = client.post("/api/migrations/start", json=malicious_request)
             # Should either fail validation (422) or be blocked (400/500)
             assert response.status_code in [400, 422, 500]
 
@@ -59,7 +59,7 @@ class TestPenetrationSecurity:
                 "ssh_port": 22
             }
             
-            response = client.post("/migrations", json=malicious_request)
+            response = client.post("/api/migrations/start", json=malicious_request)
             # Should be blocked by validation
             assert response.status_code in [400, 422, 500]
 
@@ -75,7 +75,7 @@ class TestPenetrationSecurity:
                 "ssh_port": 22
             }
             
-            response = client.post("/migrations", json=malicious_request)
+            response = client.post("/api/migrations/start", json=malicious_request)
             # Should be blocked by validation
             assert response.status_code in [400, 422, 500]
 
@@ -91,7 +91,7 @@ class TestPenetrationSecurity:
                 "ssh_port": 22
             }
             
-            response = client.post("/migrations", json=malicious_request)
+            response = client.post("/api/migrations/start", json=malicious_request)
             # Should be blocked by validation
             assert response.status_code in [400, 422, 500]
 
@@ -107,7 +107,7 @@ class TestPenetrationSecurity:
                 "ssh_port": 22
             }
             
-            response = client.post("/migrations", json=malicious_request)
+            response = client.post("/api/migrations/start", json=malicious_request)
             # Should be blocked by validation
             assert response.status_code in [400, 422, 500]
 
@@ -130,7 +130,7 @@ class TestPenetrationSecurity:
                 "ssh_port": 22
             }
             
-            response = client.post("/migrations", json=malicious_request)
+            response = client.post("/api/migrations/start", json=malicious_request)
             # Should be blocked by validation
             assert response.status_code in [400, 422, 500]
 
@@ -154,7 +154,7 @@ class TestPenetrationSecurity:
                 "ssh_port": 22
             }
             
-            response = client.post("/migrations", json=malicious_request)
+            response = client.post("/api/migrations/start", json=malicious_request)
             # Should be blocked by validation
             assert response.status_code in [400, 422, 500]
 
@@ -177,7 +177,7 @@ class TestPenetrationSecurity:
                 "ssh_port": 22
             }
             
-            response = client.post("/migrations", json=malicious_request)
+            response = client.post("/api/migrations/start", json=malicious_request)
             # Should be blocked by validation or size limits
             assert response.status_code in [400, 413, 422, 500]
 
@@ -200,7 +200,7 @@ class TestPenetrationSecurity:
                 "ssh_port": 22
             }
             
-            response = client.post("/migrations", json=malicious_request)
+            response = client.post("/api/migrations/start", json=malicious_request)
             # Should be handled appropriately
             assert response.status_code in [400, 422, 500]
 
@@ -223,7 +223,7 @@ class TestPenetrationSecurity:
                 "ssh_port": port
             }
             
-            response = client.post("/migrations", json=malicious_request)
+            response = client.post("/api/migrations/start", json=malicious_request)
             # Should be blocked by validation
             assert response.status_code in [400, 422, 500]
 
@@ -248,7 +248,7 @@ class TestPenetrationSecurity:
                 "ssh_port": 22
             }
             
-            response = client.post("/migrations", json=malicious_request)
+            response = client.post("/api/migrations/start", json=malicious_request)
             # Should be blocked by path validation
             assert response.status_code in [400, 422, 500]
 
@@ -263,7 +263,7 @@ class TestPenetrationSecurity:
         
         for payload in header_injection_payloads:
             response = client.get(
-                "/system/info",
+                "/api/system/info",
                 headers={"X-Custom-Header": payload}
             )
             
@@ -299,11 +299,11 @@ class TestPenetrationSecurity:
         
         for _ in range(5):
             start = time.time()
-            client.post("/migrations", json=valid_request)
+            client.post("/api/migrations/start", json=valid_request)
             valid_times.append(time.time() - start)
             
             start = time.time()
-            client.post("/migrations", json=invalid_request)
+            client.post("/api/migrations/start", json=invalid_request)
             invalid_times.append(time.time() - start)
         
         # Timing difference should not be excessive (avoid timing attacks)
@@ -318,7 +318,7 @@ class TestPenetrationSecurity:
         """Test rate limiting bypass attempts."""
         # Rapid fire requests to test rate limiting
         for i in range(100):
-            response = client.get("/system/info")
+            response = client.get("/api/system/info")
             
             # After a certain number of requests, should be rate limited
             # (This depends on implementation - may return 429 Too Many Requests)
@@ -345,7 +345,7 @@ class TestPenetrationSecurity:
         ]
         
         for headers in auth_bypass_headers:
-            response = client.get("/system/info", headers=headers)
+            response = client.get("/api/system/info", headers=headers)
             # Should not provide unauthorized access
             # (TransDock currently doesn't have auth, but test the pattern)
             assert response.status_code in [200, 401, 403]
@@ -392,7 +392,7 @@ class TestPenetrationSecurity:
         ]
         
         for malicious_request in edge_case_requests:
-            response = client.post("/migrations", json=malicious_request)
+            response = client.post("/api/migrations/start", json=malicious_request)
             # Should be properly validated
             assert response.status_code in [400, 422, 500]
 

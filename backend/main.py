@@ -8,6 +8,7 @@ from typing import List, Optional
 from .models import MigrationRequest, MigrationResponse, MigrationStatus
 from .migration_service import MigrationService
 from .security_utils import SecurityUtils, SecurityValidationError
+from datetime import datetime, timezone
 
 # Configure logging
 logging.basicConfig(
@@ -42,7 +43,7 @@ async def root():
         "description": "Docker Stack Migration Tool using ZFS snapshots"
     }
 
-@app.post("/migrations", response_model=MigrationResponse)
+@app.post("/api/migrations/start", response_model=MigrationResponse)
 async def create_migration(request: MigrationRequest):
     """Start a new migration process with security validation"""
     try:
@@ -66,16 +67,16 @@ async def create_migration(request: MigrationRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.get("/migrations", response_model=List[MigrationStatus])
+@app.get("/api/migrations")
 async def list_migrations():
     """List all migrations"""
     try:
         migrations = await migration_service.list_migrations()
-        return migrations
+        return {"migrations": migrations}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/migrations/{migration_id}", response_model=MigrationStatus)
+@app.get("/api/migrations/{migration_id}/status")
 async def get_migration_status(migration_id: str):
     """Get the status of a specific migration with input validation"""
     try:
@@ -101,28 +102,17 @@ async def get_migration_status(migration_id: str):
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "service": "transdock"}
+    return {
+        "status": "healthy", 
+        "service": "transdock",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
 
-@app.get("/zfs/status")
+@app.get("/api/zfs/status")
 async def zfs_status():
     """Check ZFS availability and pool status"""
     try:
-        zfs_ops = migration_service.zfs_ops
-        is_available = await zfs_ops.is_zfs_available()
-        
-        if not is_available:
-            return {"available": False, "message": "ZFS not available"}
-        
-        # Use secure ZFS command validation
-        validated_cmd = SecurityUtils.validate_zfs_command_args("list", "-H", "-o", "name")
-        returncode, stdout, stderr = await zfs_ops.run_command(validated_cmd)
-        
-        return {
-            "available": True,
-            "pool_status": stdout if returncode == 0 else "Unable to get pool status"
-        }
-    except SecurityValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
+        return await migration_service.get_zfs_status()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -155,124 +145,77 @@ async def list_datasets():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/compose/stacks")
+@app.get("/api/compose/stacks")
 async def list_compose_stacks():
     """List available Docker Compose stacks with path validation"""
     try:
-        docker_ops = migration_service.docker_ops
-        compose_base = docker_ops.compose_base_path
-        
-        # Validate base path for security
-        validated_base = SecurityUtils.sanitize_path(compose_base)
-        
-        stacks = []
-        
-        if os.path.exists(validated_base):
-            for item in os.listdir(validated_base):
-                # Validate each stack name
-                try:
-                    # Basic validation for stack names  
-                    if not item or len(item) > 64:
-                        continue
-                    if not all(c.isalnum() or c in '-_.' for c in item):
-                        continue
-                        
-                    stack_path = SecurityUtils.sanitize_path(os.path.join(validated_base, item), validated_base)
-                    
-                    if os.path.isdir(stack_path):
-                        compose_file = await docker_ops.find_compose_file(stack_path)
-                        if compose_file:
-                            stacks.append({
-                                "name": item,
-                                "path": stack_path,
-                                "compose_file": os.path.basename(compose_file)
-                            })
-                except SecurityValidationError:
-                    # Skip invalid stack names silently
-                    continue
-        
+        stacks = await migration_service.get_compose_stacks()
         return {"stacks": stacks}
-    except SecurityValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/compose/{stack_name}/analyze")
+@app.get("/api/compose/stacks/{stack_name}")
 async def analyze_compose_stack(stack_name: str):
     """Analyze a compose stack with security validation"""
     try:
-        # Validate stack name for security
-        if not stack_name or len(stack_name) > 64:
-            raise SecurityValidationError("Invalid stack name length")
-        if not all(c.isalnum() or c in '-_.' for c in stack_name):
-            raise SecurityValidationError("Stack name contains invalid characters")
-        
-        docker_ops = migration_service.docker_ops
-        compose_base = SecurityUtils.sanitize_path(docker_ops.compose_base_path)
-        stack_path = SecurityUtils.sanitize_path(os.path.join(compose_base, stack_name), compose_base)
-        
-        if not os.path.exists(stack_path):
-            raise HTTPException(status_code=404, detail="Compose stack not found")
-        
-        compose_file = await docker_ops.find_compose_file(stack_path)
-        if not compose_file:
-            raise HTTPException(status_code=404, detail="No compose file found in stack")
-        
-        compose_data = await docker_ops.parse_compose_file(compose_file)
-        volumes = await docker_ops.extract_volume_mounts(compose_data)
-        
-        # Check if volumes are datasets
-        zfs_ops = migration_service.zfs_ops
-        for volume in volumes:
-            volume.is_dataset = await zfs_ops.is_dataset(volume.source)
-            if volume.is_dataset:
-                volume.dataset_path = await zfs_ops.get_dataset_name(volume.source)
-        
-        return {
-            "stack_name": stack_name,
-            "stack_path": stack_path,
-            "compose_file": compose_file,
-            "volumes": volumes,
-            "services": list(compose_data.get('services', {}).keys())
-        }
-    except SecurityValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
+        stack_info = await migration_service.get_stack_info(stack_name)
+        return stack_info
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/system/info")
+@app.get("/api/system/info")
 async def system_info():
     """Get system information relevant to migrations"""
     try:
-        import platform
-        import subprocess
+        return await migration_service.get_system_info()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/migrations/{migration_id}/cancel")
+async def cancel_migration(migration_id: str):
+    """Cancel a running migration"""
+    try:
+        # Validate migration_id format
+        if not migration_id or len(migration_id) > 64:
+            raise SecurityValidationError("Invalid migration ID format")
         
-        # Basic system info
-        info = {
-            "hostname": platform.node(),
-            "platform": platform.platform(),
-            "architecture": platform.architecture()[0]
-        }
+        if not all(c.isalnum() or c in '-_' for c in migration_id):
+            raise SecurityValidationError("Migration ID contains invalid characters")
         
-        # Check Docker status safely
-        try:
-            result = subprocess.run(["docker", "version", "--format", "{{.Server.Version}}"], 
-                                    capture_output=True, text=True, timeout=10)
-            if result.returncode == 0:
-                info["docker_version"] = result.stdout.strip()
-            else:
-                info["docker_version"] = "unavailable"
-        except Exception:
-            info["docker_version"] = "unavailable"
+        success = await migration_service.cancel_migration(migration_id)
+        if success:
+            return {"success": True, "message": "Migration cancelled successfully"}
+        else:
+            raise HTTPException(status_code=400, detail="Failed to cancel migration")
+    except SecurityValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Migration not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/migrations/{migration_id}/cleanup")
+async def cleanup_migration(migration_id: str):
+    """Clean up migration resources"""
+    try:
+        # Validate migration_id format
+        if not migration_id or len(migration_id) > 64:
+            raise SecurityValidationError("Invalid migration ID format")
         
-        # Check ZFS status safely
-        try:
-            zfs_ops = migration_service.zfs_ops
-            info["zfs_available"] = str(await zfs_ops.is_zfs_available())
-        except Exception:
-            info["zfs_available"] = "False"
+        if not all(c.isalnum() or c in '-_' for c in migration_id):
+            raise SecurityValidationError("Migration ID contains invalid characters")
         
-        return info
+        success = await migration_service.cleanup_migration(migration_id)
+        if success:
+            return {"success": True, "message": "Migration cleaned up successfully"}
+        else:
+            raise HTTPException(status_code=400, detail="Failed to cleanup migration")
+    except SecurityValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Migration not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -32,7 +32,18 @@ class TestAPIEndpoints:
     @pytest.fixture
     def mock_migration_service(self):
         """Mock migration service."""
+        from unittest.mock import AsyncMock
         with patch('backend.main.migration_service') as mock:
+            # Configure async methods to return awaitable values
+            mock.get_system_info = AsyncMock()
+            mock.get_zfs_status = AsyncMock() 
+            mock.get_compose_stacks = AsyncMock()
+            mock.get_stack_info = AsyncMock()
+            mock.start_migration = AsyncMock()
+            mock.get_migration_status = AsyncMock()
+            mock.list_migrations = AsyncMock()
+            mock.cancel_migration = AsyncMock()
+            mock.cleanup_migration = AsyncMock()
             yield mock
 
     def test_health_check(self, client):
@@ -157,7 +168,14 @@ class TestAPIEndpoints:
         """Test start migration endpoint success."""
         mock_migration_service.start_migration.return_value = "migration-test-123"
         
-        request_data = MIGRATION_REQUEST_AUTHELIA
+        request_data = {
+            "compose_dataset": "authelia",
+            "target_host": "192.168.1.100",
+            "target_base_path": "/home/user/docker",
+            "ssh_user": "root",
+            "ssh_port": 22,
+            "force_rsync": False
+        }
         
         response = client.post("/api/migrations/start", json=request_data)
         
@@ -365,7 +383,15 @@ class TestAPIEndpoints:
         mock_migration_service.cleanup_migration.return_value = True
         
         # 1. Start migration
-        start_response = client.post("/api/migrations/start", json=MIGRATION_REQUEST_AUTHELIA)
+        request_data = {
+            "compose_dataset": "authelia",
+            "target_host": "192.168.1.100",
+            "target_base_path": "/home/user/docker",
+            "ssh_user": "root",
+            "ssh_port": 22,
+            "force_rsync": False
+        }
+        start_response = client.post("/api/migrations/start", json=request_data)
         assert start_response.status_code == 200
         migration_id = start_response.json()["migration_id"]
         

@@ -146,23 +146,34 @@ SYSTEM_INFO_NO_ZFS = {
 }
 
 # Sample migration requests
-MIGRATION_REQUEST_AUTHELIA = {
-    'compose_dataset': 'authelia',
-    'target_host': '192.168.1.100',
-    'target_base_path': '/home/user/docker',
-    'ssh_user': 'root',
-    'ssh_port': 22,
-    'force_rsync': False
-}
+from backend.models import MigrationRequest
 
-MIGRATION_REQUEST_FORCE_RSYNC = {
-    'compose_dataset': 'wordpress',
-    'target_host': '192.168.1.101',
-    'target_base_path': '/opt/docker',
-    'ssh_user': 'admin',
-    'ssh_port': 2222,
-    'force_rsync': True
-}
+MIGRATION_REQUEST_AUTHELIA = MigrationRequest(
+    compose_dataset='authelia',
+    target_host='192.168.1.100',
+    target_base_path='/home/user/docker',
+    ssh_user='root',
+    ssh_port=22,
+    force_rsync=False
+)
+
+MIGRATION_REQUEST_FORCE_RSYNC = MigrationRequest(
+    compose_dataset='wordpress',
+    target_host='192.168.1.101',
+    target_base_path='/opt/docker',
+    ssh_user='admin',
+    ssh_port=2222,
+    force_rsync=True
+)
+
+MIGRATION_REQUEST_SIMPLE = MigrationRequest(
+    compose_dataset='nginx',
+    target_host='192.168.1.50',
+    target_base_path='/home/ubuntu/compose',
+    ssh_user='ubuntu',
+    ssh_port=22,
+    force_rsync=False
+)
 
 # Sample migration statuses
 MIGRATION_STATUS_RUNNING = {

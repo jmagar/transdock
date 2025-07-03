@@ -5,6 +5,7 @@ import re
 import shlex
 from dataclasses import dataclass
 from typing import List, Optional
+from urllib.parse import unquote
 
 
 class SecurityValidationError(Exception):
@@ -66,51 +67,73 @@ class SecurityUtils:
         return port
     
     @staticmethod
-    def validate_dataset_name(dataset_name: str) -> str:
+    def validate_dataset_name(name: str) -> str:
         """Validate ZFS dataset name."""
-        if not dataset_name or len(dataset_name) > 256:
-            raise SecurityValidationError(f"Invalid dataset name length: {dataset_name}")
+        if not name or len(name) > 256:
+            raise SecurityValidationError(f"Invalid dataset name length: {name}")
         
-        if not SecurityUtils.DATASET_NAME_PATTERN.match(dataset_name):
-            raise SecurityValidationError(f"Invalid dataset name format: {dataset_name}")
+        if not SecurityUtils.DATASET_NAME_PATTERN.match(name):
+            raise SecurityValidationError(f"Invalid dataset name format: {name}")
         
         # Check for path traversal attempts
-        if '..' in dataset_name or dataset_name.startswith('/'):
-            raise SecurityValidationError(f"Dataset name contains path traversal: {dataset_name}")
+        if '..' in name or name.startswith('/'):
+            raise SecurityValidationError(f"Dataset name contains path traversal: {name}")
         
-        return dataset_name
+        return name
     
     @staticmethod
-    def sanitize_path(path: str, base_path: Optional[str] = None) -> str:
+    def sanitize_path(path: str, base_path: Optional[str] = None, allow_absolute: bool = False) -> str:
         """Sanitize and validate file paths to prevent directory traversal."""
         if not path:
             raise SecurityValidationError("Path cannot be empty")
         
-        # Check for path traversal attempts BEFORE normalization
-        if '..' in path or path.startswith('../'):
-            raise SecurityValidationError(f"Path contains directory traversal: {path}")
+        original_path = path
         
-        # Check for null bytes and other dangerous characters
-        if '\0' in path:
-            raise SecurityValidationError(f"Path contains null bytes: {path}")
+        # 1. URL Decode (single and double)
+        try:
+            decoded_path = unquote(path)
+            while path != decoded_path:
+                path = decoded_path
+                decoded_path = unquote(path)
+        except Exception:
+            # If decoding fails, it's a suspicious path
+            raise SecurityValidationError(f"Path contains invalid URL encoding: {original_path}")
         
-        # Normalize the path after validation
+        # 2. Check for null bytes
+        if '\\0' in path or '\x00' in path:
+            raise SecurityValidationError(f"Path contains null bytes: {original_path}")
+
+        # 3. Check for various path traversal patterns BEFORE normalization
+        traversal_patterns = ['..\\.', '../', '..\\', '%2e%2e', '%2e%2e%2f', '%2e%2e%5c', '....//']
+        for pattern in traversal_patterns:
+            if pattern in path.lower():
+                raise SecurityValidationError(f"Path contains directory traversal attempt: {original_path}")
+        
+        # Additional check for Unicode-encoded path traversal
+        if '\xc0\xaf' in path or '��' in path:
+            raise SecurityValidationError(f"Path contains directory traversal attempt: {original_path}")
+        
+        # 4. Check for absolute paths (both Unix and Windows style) - block by default for security
+        if path.startswith('/') or (len(path) > 1 and path[1] == ':') or path.startswith('\\'):
+            if not allow_absolute:
+                raise SecurityValidationError(f"Path contains directory traversal attempt: {original_path}")
+
+        # 5. Normalize the path to resolve '..' and '.' components
         normalized_path = os.path.normpath(path)
         
-        # If base_path is provided, ensure the path is within it using cross-platform approach
+        # 6. Check for directory traversal patterns AFTER normalization
+        if '..' in normalized_path.split(os.sep):
+             raise SecurityValidationError(f"Path contains directory traversal attempt: {original_path}")
+
+        # 7. If base_path is provided, ensure the path is within it
         if base_path:
-            try:
-                # Make paths absolute for reliable comparison
-                abs_base = os.path.abspath(base_path)
-                abs_normalized = os.path.abspath(normalized_path)
-                
-                # Use os.path.commonpath for robust cross-platform containment check
-                common_path = os.path.commonpath([abs_base, abs_normalized])
-                if common_path != abs_base:
-                    raise SecurityValidationError(f"Path is outside base directory: {path}")
-            except ValueError:
-                # os.path.commonpath raises ValueError if paths are on different drives (Windows)
-                raise SecurityValidationError(f"Path is outside base directory: {path}")
+            real_base_path = os.path.realpath(base_path)
+            # IMPORTANT: Join with the *un-normalized* path to avoid issues with absolute paths
+            # The realpath will resolve it safely
+            real_user_path = os.path.realpath(os.path.join(real_base_path, normalized_path))
+            
+            if not real_user_path.startswith(real_base_path):
+                raise SecurityValidationError(f"Path is outside of the allowed base directory: {original_path}")
         
         return normalized_path
     
@@ -219,4 +242,17 @@ class SecurityUtils:
         SecurityUtils.validate_port(ssh_port)
         
         # Validate target base path
-        SecurityUtils.sanitize_path(target_base_path)
+        SecurityUtils.sanitize_path(target_base_path, allow_absolute=True)
+        
+        # Additional validation for obviously malicious target paths
+        dangerous_paths = [
+            '/etc/', '/var/log/', '/usr/bin/', '/bin/', '/sbin/', '/boot/',
+            '/sys/', '/proc/', '/dev/', '/root/', '/tmp/', '/var/tmp/',
+            '\\windows\\', '\\system32\\', '\\program files\\', '\\users\\',
+            '\\boot\\', '\\recovery\\'
+        ]
+        
+        target_lower = target_base_path.lower()
+        for dangerous_path in dangerous_paths:
+            if target_lower.startswith(dangerous_path) or dangerous_path in target_lower:
+                raise SecurityValidationError(f"Target path contains dangerous system directory: {target_base_path}")
