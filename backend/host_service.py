@@ -2,7 +2,7 @@ import logging
 import os
 import yaml
 import asyncio
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from .models import HostInfo, HostCapabilities, RemoteStack, StackAnalysis, VolumeMount, StorageInfo, StorageValidationResult, MigrationStorageRequirement
 from .security_utils import SecurityUtils, SecurityValidationError
 from .docker_ops import DockerOperations
@@ -193,26 +193,33 @@ class HostService:
         
         return stacks
     
+    async def _get_running_container_count(self, host_info: HostInfo, container_ids: List[str]) -> int:
+        """Get the number of running containers from a list of container IDs."""
+        running_count = 0
+        for container_id in container_ids:
+            if container_id.strip():
+                # Use a more secure way to build the command
+                cmd_args = SecurityUtils.validate_system_command_args(
+                    "docker", "inspect", container_id.strip(), "--format='{{.State.Running}}'"
+                )
+                cmd = " ".join(cmd_args)
+                ret, out, err = await self.run_remote_command(host_info, cmd)
+                if ret == 0 and 'true' in out:
+                    running_count += 1
+        return running_count
+
     async def _get_remote_stack_status(self, host_info: HostInfo, stack_dir: str) -> str:
         """Get the status of a remote stack"""
         try:
             # Check if stack is running using docker-compose ps
             compose_cmd = f"cd {SecurityUtils.escape_shell_argument(stack_dir)} && docker-compose ps -q"
             returncode, stdout, stderr = await self.run_remote_command(host_info, compose_cmd)
-            
+
             if returncode == 0:
                 if stdout.strip():
-                    # Check if containers are actually running
                     container_ids = stdout.strip().split('\n')
-                    running_count = 0
-                    
-                    for container_id in container_ids:
-                        if container_id.strip():
-                            status_cmd = f"docker inspect {container_id.strip()} --format='{{{{.State.Running}}}}'"
-                            ret, out, err = await self.run_remote_command(host_info, status_cmd)
-                            if ret == 0 and 'true' in out:
-                                running_count += 1
-                    
+                    running_count = await self._get_running_container_count(host_info, container_ids)
+
                     if running_count == len(container_ids):
                         return "running"
                     if running_count > 0:
@@ -222,7 +229,7 @@ class HostService:
                     return "stopped"
             else:
                 return "unknown"
-        
+
         except Exception as e:
             logger.error(f"Failed to get stack status: {e}")
             return "unknown"
@@ -321,7 +328,7 @@ class HostService:
         
         except Exception as e:
             logger.error(f"Failed to analyze stack: {e}")
-            raise ValueError(f"Failed to analyze stack: {e}")
+            raise ValueError(f"Failed to analyze stack: {e}") from e
     
     async def _find_compose_file(self, host_info: HostInfo, stack_path: str) -> Optional[str]:
         """Find the compose file in a remote stack directory."""
@@ -591,7 +598,7 @@ class HostService:
             
             # Check target storage
             total_required_bytes = (storage_requirement.estimated_transfer_size_bytes + 
-                                  storage_requirement.zfs_snapshot_overhead_bytes)
+                                    storage_requirement.zfs_snapshot_overhead_bytes)
             
             target_validation = await self.check_storage_availability(
                 target_host_info, target_base_path, total_required_bytes

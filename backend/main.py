@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import logging
-from typing import Optional, Dict
+from typing import Optional
 from .models import (
     MigrationRequest, MigrationResponse, HostValidationRequest, 
     HostInfo, HostCapabilities, StackAnalysis
@@ -37,7 +37,6 @@ migration_service = MigrationService()
 host_service = HostService()
 zfs_service = ZFSOperations()
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -81,12 +80,11 @@ async def create_migration(request: MigrationRequest):
             raise HTTPException(
                 status_code=422,
                 detail=f"Storage validation failed - {error_message}. Please ensure target system has sufficient disk space.") from e
-        elif "Insufficient storage space" in error_message:
+        if "Insufficient storage space" in error_message:
             raise HTTPException(
                 status_code=422,
                 detail=f"Insufficient storage space - {error_message}. Free up disk space or choose a different target path.") from e
-        else:
-            raise HTTPException(status_code=400, detail=error_message) from e
+        raise HTTPException(status_code=400, detail=error_message) from e
 
 
 @app.get("/api/migrations")
@@ -422,7 +420,8 @@ async def list_remote_datasets(hostname: str, ssh_user: str = "root", ssh_port: 
         )
         
         # List datasets on remote host
-        zfs_cmd = "zfs list -H -o name,mountpoint -t filesystem"
+        zfs_cmd_args = SecurityUtils.validate_zfs_command_args("list", "-H", "-o", "name,mountpoint", "-t", "filesystem")
+        zfs_cmd = " ".join(zfs_cmd_args)
         returncode, stdout, stderr = await host_service.run_remote_command(host_info, zfs_cmd)
         
         if returncode != 0:

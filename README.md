@@ -93,7 +93,7 @@ transdock/
 
 ### Prerequisites
 
-- **UV** - Modern Python package manager ([install here](https://docs.astral.sh/uv/getting-started/installation/))
+- **UV** - Modern Python package manager ([install instructions](https://docs.astral.sh/uv/getting-started/installation/))
 - **ZFS** installed and configured (optional - rsync fallback available)
 - **Docker** and **docker-compose**
 - **SSH access** to target/source machines

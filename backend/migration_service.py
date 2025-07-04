@@ -6,7 +6,7 @@ import logging
 import yaml
 from datetime import datetime
 from typing import Dict, List, Any, Tuple
-from .models import MigrationRequest, MigrationStatus, TransferMethod, HostInfo, StorageValidationResult
+from .models import MigrationRequest, MigrationStatus, TransferMethod, HostInfo, StorageValidationResult, VolumeMount
 from .zfs_ops import ZFSOperations
 from .docker_ops import DockerOperations
 from .transfer_ops import TransferOperations
@@ -300,7 +300,7 @@ class MigrationService:
             if target_storage_check.warning_message:
                 logger.warning(f"Target storage warning: {target_storage_check.warning_message}")
             
-            logger.info(f"Final storage validation passed - ready for transfer")
+            logger.info("Final storage validation passed - ready for transfer")
 
             # Step 7: Create volume path mapping
             volume_mapping = await self.transfer_ops.create_volume_mapping(volumes, request.target_base_path)
@@ -866,7 +866,7 @@ class MigrationService:
                 "services": list(compose_data.get('services',
                                                   {}).keys())}
 
-    async def _create_local_snapshots(self, compose_dir: str, volumes: List, timestamp: str) -> List[Tuple[str, str]]:
+    async def _create_local_snapshots(self, compose_dir: str, volumes: List[VolumeMount], timestamp: str) -> List[Tuple[str, str]]:
         """Create ZFS snapshots for all local volumes"""
         snapshot_tasks = []
         for volume in volumes:
@@ -882,7 +882,7 @@ class MigrationService:
         
         return results
     
-    async def _create_remote_snapshots(self, source_host_info: HostInfo, compose_dir: str, volumes: List, timestamp: str) -> List[Tuple[str, str]]:
+    async def _create_remote_snapshots(self, source_host_info: HostInfo, compose_dir: str, volumes: List[VolumeMount], timestamp: str) -> List[Tuple[str, str]]:
         """Create ZFS snapshots on remote host"""
         snapshots = []
         
@@ -940,9 +940,9 @@ class MigrationService:
         
         return snapshots
 
-    async def _create_snapshot_for_volume(self, volume: Dict, timestamp: str) -> Tuple[str, str]:
+    async def _create_snapshot_for_volume(self, volume: VolumeMount, timestamp: str) -> Tuple[str, str]:
         """Create a snapshot for a single volume"""
-        dataset = volume['source']
+        dataset = volume.source
         snapshot_name = f"{dataset}@{timestamp}"
         success = await self.zfs_ops.create_snapshot(dataset, snapshot_name)
         if not success:

@@ -1,8 +1,7 @@
 import asyncio
 import logging
-import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, List, Dict, Union, Tuple, Any
 from collections import defaultdict
 from .security_utils import SecurityUtils, SecurityValidationError
@@ -586,14 +585,11 @@ class ZFSOperations:
         
         try:
             # Handle decimal numbers
-            if "." in size_str:
-                numeric_value = float(size_str)
-            else:
-                numeric_value = int(size_str)
+            numeric_value = float(size_str) if "." in size_str else int(size_str)
             
             return int(numeric_value * units[unit])
         except ValueError:
-            raise ValueError(f"Cannot parse size: {size_str}")
+            raise ValueError(f"Cannot parse size: {size_str}") from None
     
     async def get_dataset_snapshots_detailed(self, dataset_name: str) -> List[Dict[str, Union[str, int]]]:
         """Get detailed information about snapshots for a dataset"""
@@ -1598,7 +1594,7 @@ class ZFSOperations:
 
         snapshot_full_name = result.get("snapshot_name", "")
         if not (isinstance(snapshot_full_name, str) and snapshot_full_name):
-             return {"success": False, "error": "Incremental snapshot name not returned."}
+            return {"success": False, "error": "Incremental snapshot name not returned."}
 
         actions = [f"Created incremental backup: {snapshot_full_name}"]
         bookmark_success = await self.create_snapshot_bookmark(snapshot_full_name, f"{snapshot_name}_bookmark")
@@ -1652,7 +1648,7 @@ class ZFSOperations:
             if not isinstance(strategy, dict):
                 return {"success": False, "error": "Invalid backup strategy format"}
             
-            results: Dict[str, Any] = { "dataset": dataset_name, "executed_actions": [], "success": True, "errors": [] }
+            results: Dict[str, Any] = {"dataset": dataset_name, "executed_actions": [], "success": True, "errors": []}
             next_action = strategy.get("next_action", "")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_result = {}
@@ -1771,16 +1767,117 @@ class ZFSOperations:
             logger.error(f"Security validation failed for restore_from_backup: {e}")
             return {"success": False, "error": f"Security validation failed: {str(e)}"}
     
-    async def verify_backup_integrity(self, backup_snapshot: str) -> Dict[str, Union[str, bool, int]]:
-        """Verify the integrity of a backup snapshot"""
+    async def _verify_snapshot_exists(self, backup_snapshot: str) -> Dict[str, Any]:
+        """Verify that the backup snapshot exists"""
+        returncode, _, _ = await self.safe_run_zfs_command("list", "-H", "-t", "snapshot", backup_snapshot)
+        return {
+            "success": returncode == 0,
+            "check_name": "Snapshot existence check",
+            "issue": "Backup snapshot does not exist" if returncode != 0 else None
+        }
+
+    async def _verify_snapshot_properties(self, backup_snapshot: str) -> Dict[str, Any]:
+        """Retrieve and validate snapshot properties"""
+        snapshot_props = await self.get_dataset_properties(backup_snapshot, [
+            "used", "referenced", "creation", "clones"
+        ])
+        
+        result = {
+            "success": bool(snapshot_props),
+            "check_name": "Snapshot properties check",
+            "properties": snapshot_props,
+            "issue": None
+        }
+        
+        if not snapshot_props:
+            result["issue"] = "Could not retrieve snapshot properties"
+            return result
+        
+        # Check if snapshot has reasonable size
         try:
-            # Validate snapshot name
+            used_bytes = self._parse_zfs_size(snapshot_props.get("used", "0"))
+            if used_bytes == 0:
+                result["issue"] = "Snapshot reports zero used space"
+                result["success"] = False
+            else:
+                result["size_bytes"] = used_bytes
+                result["size_human"] = format_bytes(used_bytes)
+        except ValueError:
+            result["issue"] = "Could not parse snapshot size"
+            result["success"] = False
+        
+        return result
+
+    async def _verify_parent_pool_health(self, backup_snapshot: str) -> Dict[str, Any]:
+        """Check the health of the parent pool"""
+        dataset_name = backup_snapshot.split('@')[0]
+        pool_name = dataset_name.split('/')[0]
+        
+        pool_health = await self.get_pool_health(pool_name)
+        is_healthy = pool_health and pool_health.get("healthy", False)
+        
+        return {
+            "success": is_healthy,
+            "check_name": "Parent pool health check",
+            "pool_name": pool_name,
+            "pool_healthy": is_healthy,
+            "issue": f"Parent pool {pool_name} is not healthy" if not is_healthy else None
+        }
+
+    async def _verify_snapshot_accessibility(self, backup_snapshot: str) -> Dict[str, Any]:
+        """Verify snapshot accessibility by attempting to access its contents"""
+        dataset_name = backup_snapshot.split('@')[0]
+        
+        try:
+            dataset_props = await self.get_dataset_properties(dataset_name, ["mountpoint"])
+            mountpoint = dataset_props.get("mountpoint")
+            
+            if mountpoint and mountpoint != "none" and mountpoint != "-":
+                snapshot_suffix = backup_snapshot.split('@')[1]
+                snapshot_path = f"{mountpoint}/.zfs/snapshot/{snapshot_suffix}"
+                
+                returncode, stdout, stderr = await self.run_command(["ls", "-la", snapshot_path])
+                if returncode == 0:
+                    return {
+                        "success": True,
+                        "check_name": "Snapshot accessibility check",
+                        "accessible": True,
+                        "issue": None
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "check_name": "Snapshot accessibility check",
+                        "accessible": False,
+                        "issue": f"Cannot access snapshot contents: {stderr}"
+                    }
+            else:
+                return {
+                    "success": True,
+                    "check_name": "Snapshot accessibility check (skipped - no mountpoint)",
+                    "accessible": None,
+                    "issue": None
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "check_name": "Snapshot accessibility check",
+                "accessible": False,
+                "issue": f"Error checking snapshot accessibility: {str(e)}"
+            }
+
+    async def verify_backup_integrity(self, backup_snapshot: str) -> Dict[str, Union[str, bool, int]]:
+        """Verify backup integrity by checking snapshot health and accessibility"""
+        try:
+            # Validate snapshot name format
             if '@' not in backup_snapshot:
                 raise SecurityValidationError("Invalid snapshot name format")
             
             dataset_name = backup_snapshot.split('@')[0]
             dataset_name = SecurityUtils.validate_dataset_name(dataset_name)
             
+            # Initialize verification result
             verification_result = {
                 "backup_snapshot": backup_snapshot,
                 "verification_time": datetime.now().isoformat(),
@@ -1789,77 +1886,44 @@ class ZFSOperations:
                 "overall_status": "unknown"
             }
             
-            # Check 1: Verify snapshot exists
-            returncode, _, _ = await self.safe_run_zfs_command("list", "-H", "-t", "snapshot", backup_snapshot)
-            if returncode != 0:
-                verification_result["issues_found"].append("Backup snapshot does not exist")
-                verification_result["overall_status"] = "failed"
-                return verification_result
+            # Perform verification steps sequentially
+            verification_steps = [
+                self._verify_snapshot_exists(backup_snapshot),
+                self._verify_snapshot_properties(backup_snapshot),
+                self._verify_parent_pool_health(backup_snapshot),
+                self._verify_snapshot_accessibility(backup_snapshot)
+            ]
             
-            verification_result["checks_performed"].append("Snapshot existence check")
-            
-            # Check 2: Get snapshot properties and verify integrity
-            snapshot_props = await self.get_dataset_properties(backup_snapshot, [
-                "used", "referenced", "creation", "clones"
-            ])
-            
-            if snapshot_props:
-                verification_result["checks_performed"].append("Snapshot properties check")
-                verification_result["properties"] = snapshot_props
+            # Execute all verification steps
+            for step_coro in verification_steps:
+                step_result = await step_coro
+                verification_result["checks_performed"].append(step_result["check_name"])
                 
-                # Check if snapshot has reasonable size
-                try:
-                    used_bytes = self._parse_zfs_size(snapshot_props.get("used", "0"))
-                    if used_bytes == 0:
-                        verification_result["issues_found"].append("Snapshot reports zero used space")
-                    else:
-                        verification_result["size_bytes"] = used_bytes
-                        verification_result["size_human"] = format_bytes(used_bytes)
-                except ValueError:
-                    verification_result["issues_found"].append("Could not parse snapshot size")
-            else:
-                verification_result["issues_found"].append("Could not retrieve snapshot properties")
-            
-            # Check 3: Verify parent dataset health
-            parent_dataset = dataset_name
-            pool_name = parent_dataset.split('/')[0]
-            
-            pool_health = await self.get_pool_health(pool_name)
-            if pool_health and pool_health.get("healthy", False):
-                verification_result["checks_performed"].append("Parent pool health check")
-                verification_result["pool_healthy"] = True
-            else:
-                verification_result["issues_found"].append(f"Parent pool {pool_name} is not healthy")
-                verification_result["pool_healthy"] = False
-            
-            # Check 4: Verify snapshot can be accessed (try to list its contents)
-            try:
-                # Get the mountpoint of the snapshot's .zfs/snapshot directory
-                dataset_props = await self.get_dataset_properties(parent_dataset, ["mountpoint"])
-                mountpoint = dataset_props.get("mountpoint")
+                # Add step-specific data to result
+                if "properties" in step_result:
+                    verification_result["properties"] = step_result["properties"]
+                if "size_bytes" in step_result:
+                    verification_result["size_bytes"] = step_result["size_bytes"]
+                    verification_result["size_human"] = step_result["size_human"]
+                if "pool_healthy" in step_result:
+                    verification_result["pool_healthy"] = step_result["pool_healthy"]
+                if "accessible" in step_result:
+                    verification_result["accessible"] = step_result["accessible"]
                 
-                if mountpoint and mountpoint != "none" and mountpoint != "-":
-                    snapshot_suffix = backup_snapshot.split('@')[1]
-                    snapshot_path = f"{mountpoint}/.zfs/snapshot/{snapshot_suffix}"
-                    
-                    # Try to list the snapshot directory
-                    returncode, stdout, stderr = await self.run_command(["ls", "-la", snapshot_path])
-                    if returncode == 0:
-                        verification_result["checks_performed"].append("Snapshot accessibility check")
-                        verification_result["accessible"] = True
-                    else:
-                        verification_result["issues_found"].append(f"Cannot access snapshot contents: {stderr}")
-                        verification_result["accessible"] = False
-                else:
-                    verification_result["checks_performed"].append("Snapshot accessibility check (skipped - no mountpoint)")
-                    
-            except Exception as e:
-                verification_result["issues_found"].append(f"Error checking snapshot accessibility: {str(e)}")
+                # Collect issues
+                if step_result["issue"]:
+                    verification_result["issues_found"].append(step_result["issue"])
+                
+                # Stop early if critical step fails
+                if not step_result["success"] and step_result["check_name"] == "Snapshot existence check":
+                    verification_result["overall_status"] = "failed"
+                    break
             
-            # Determine overall status
+            # Determine overall status based on aggregated results
             if not verification_result["issues_found"]:
                 verification_result["overall_status"] = "healthy"
-            elif len(verification_result["issues_found"]) == 1 and "accessibility" in verification_result["issues_found"][0]:
+            elif (len(verification_result["issues_found"]) == 1 and 
+                  "accessibility" in verification_result["issues_found"][0]):
                 verification_result["overall_status"] = "warning"  # Snapshot exists but might not be mounted
             else:
                 verification_result["overall_status"] = "failed"

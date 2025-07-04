@@ -198,9 +198,9 @@ class SecurityUtils:
         
         # Final validation on base_path
         if not base_path or '..' in base_path:
-             raise ValueError(f"Invalid base path derived from wildcard: {path}")
+            raise ValueError(f"Invalid base path derived from wildcard: {path}")
 
-        return base_path if base_path else ".", pattern
+        return base_path, pattern
 
     @staticmethod
     def escape_shell_argument(arg: str) -> str:
