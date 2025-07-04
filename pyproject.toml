@@ -51,3 +51,9 @@ test = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "autopep8>=2.3.2",
+    "flake8>=7.3.0",
+]
