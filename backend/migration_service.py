@@ -5,10 +5,15 @@ import uuid
 import logging
 import yaml
 from datetime import datetime
-from typing import Dict, List, Any, Tuple
-from .models import MigrationRequest, MigrationStatus, TransferMethod, HostInfo, StorageValidationResult, VolumeMount
+from typing import Dict, List, Any, Tuple, Optional
+from .models import (
+    MigrationRequest, ContainerMigrationRequest, MigrationStatus, MigrationResponse,
+    TransferMethod, HostInfo, StorageValidationResult, VolumeMount, 
+    ContainerDiscoveryResult, ContainerSummary, ContainerAnalysis, NetworkSummary,
+    IdentifierType
+)
 from .zfs_ops import ZFSOperations
-from .docker_ops import DockerOperations
+from .docker_ops import DockerOperations, ContainerInfo, NetworkInfo
 from .transfer_ops import TransferOperations
 from .host_service import HostService
 from .security_utils import SecurityUtils, SecurityValidationError
@@ -948,3 +953,501 @@ class MigrationService:
         if not success:
             raise Exception(f"Failed to create snapshot for {dataset}")
         return snapshot_name, dataset
+
+    async def discover_containers(self, 
+                                container_identifier: str,
+                                identifier_type: IdentifierType,
+                                label_filters: Optional[Dict[str, str]] = None,
+                                source_host: Optional[str] = None,
+                                source_ssh_user: str = "root",
+                                source_ssh_port: int = 22) -> ContainerDiscoveryResult:
+        """Discover containers for migration"""
+        try:
+            if source_host:
+                # Remote container discovery via SSH
+                containers = await self._discover_containers_remote(
+                    container_identifier, identifier_type, label_filters,
+                    source_host, source_ssh_user, source_ssh_port
+                )
+            else:
+                # Local container discovery
+                if identifier_type == IdentifierType.PROJECT:
+                    containers = await self.docker_ops.discover_containers_by_project(container_identifier)
+                elif identifier_type == IdentifierType.NAME:
+                    containers = await self.docker_ops.discover_containers_by_name(container_identifier)
+                elif identifier_type == IdentifierType.LABELS:
+                    if not label_filters:
+                        raise ValueError("Label filters required when using labels identifier type")
+                    containers = await self.docker_ops.discover_containers_by_labels(label_filters)
+                else:
+                    raise ValueError(f"Unsupported identifier type: {identifier_type}")
+
+            # Convert to summary format
+            container_summaries = []
+            for container in containers:
+                volumes = await self.docker_ops.get_container_volumes(container)
+                summary = {
+                    "id": container.id,
+                    "name": container.name,
+                    "image": container.image,
+                    "state": container.state,
+                    "status": container.status,
+                    "project_name": container.project_name,
+                    "service_name": container.service_name,
+                    "volume_count": len([v for v in volumes if v.source.startswith('/')]),
+                    "network_count": len(container.networks),
+                    "port_count": len([p for p in container.ports.values() if p])
+                }
+                container_summaries.append(summary)
+
+            return ContainerDiscoveryResult(
+                containers=container_summaries,
+                total_containers=len(containers),
+                discovery_method=identifier_type.value,
+                query=container_identifier
+            )
+
+        except Exception as e:
+            logger.error(f"Container discovery failed: {e}")
+            raise
+
+    async def analyze_containers_for_migration(self,
+                                             container_identifier: str,
+                                             identifier_type: IdentifierType,
+                                             label_filters: Optional[Dict[str, str]] = None,
+                                             source_host: Optional[str] = None) -> ContainerAnalysis:
+        """Analyze containers to provide migration insights"""
+        try:
+            # Discover containers
+            discovery_result = await self.discover_containers(
+                container_identifier, identifier_type, label_filters, source_host
+            )
+
+            # Get detailed container information
+            if source_host:
+                containers = await self._get_containers_info_remote(
+                    container_identifier, identifier_type, label_filters, source_host
+                )
+            else:
+                if identifier_type == IdentifierType.PROJECT:
+                    containers = await self.docker_ops.discover_containers_by_project(container_identifier)
+                elif identifier_type == IdentifierType.NAME:
+                    containers = await self.docker_ops.discover_containers_by_name(container_identifier)
+                else:
+                    containers = await self.docker_ops.discover_containers_by_labels(label_filters)
+
+            # Analyze containers
+            container_summaries = []
+            networks = []
+            total_volumes = 0
+            total_bind_mounts = 0
+            warnings = []
+            recommendations = []
+
+            for container in containers:
+                volumes = await self.docker_ops.get_container_volumes(container)
+                bind_mounts = [v for v in volumes if v.source.startswith('/')]
+                
+                container_summary = ContainerSummary(
+                    id=container.id,
+                    name=container.name,
+                    image=container.image,
+                    state=container.state,
+                    status=container.status,
+                    project_name=container.project_name,
+                    service_name=container.service_name,
+                    volume_count=len(volumes),
+                    network_count=len(container.networks),
+                    port_count=len([p for p in container.ports.values() if p])
+                )
+                container_summaries.append(container_summary)
+                
+                total_volumes += len(volumes)
+                total_bind_mounts += len(bind_mounts)
+
+                # Generate warnings
+                if container.state != 'running':
+                    warnings.append(f"Container {container.name} is not running")
+                
+                if not bind_mounts:
+                    warnings.append(f"Container {container.name} has no persistent data volumes")
+
+            # Get project networks if this is a project-based discovery
+            if identifier_type == IdentifierType.PROJECT and containers:
+                project_networks = await self.docker_ops.get_project_networks(container_identifier)
+                for net in project_networks:
+                    network_summary = NetworkSummary(
+                        id=net.id,
+                        name=net.name,
+                        driver=net.driver,
+                        scope=net.scope,
+                        project_name=container_identifier
+                    )
+                    networks.append(network_summary)
+
+            # Determine complexity
+            complexity = "simple"
+            if len(containers) > 3 or len(networks) > 2:
+                complexity = "medium"
+            if len(containers) > 5 or total_bind_mounts > 10 or len(networks) > 3:
+                complexity = "complex"
+
+            # Generate recommendations
+            if total_bind_mounts > 0:
+                recommendations.append("Consider using ZFS snapshots for consistent data migration")
+            
+            if len(networks) > 1:
+                recommendations.append("Custom networks will be recreated on the target system")
+            
+            if complexity == "complex":
+                recommendations.append("Consider migrating containers in smaller batches")
+
+            return ContainerAnalysis(
+                containers=container_summaries,
+                networks=networks,
+                total_volumes=total_volumes,
+                total_bind_mounts=total_bind_mounts,
+                migration_complexity=complexity,
+                warnings=warnings,
+                recommendations=recommendations
+            )
+
+        except Exception as e:
+            logger.error(f"Container analysis failed: {e}")
+            raise
+
+    async def start_container_migration(self, request: ContainerMigrationRequest) -> str:
+        """Start a container-based migration"""
+        migration_id = str(uuid.uuid4())
+        
+        try:
+            # Discover containers
+            if request.source_host:
+                containers = await self._get_containers_info_remote(
+                    request.container_identifier, request.identifier_type, 
+                    request.label_filters, request.source_host, 
+                    request.source_ssh_user, request.source_ssh_port
+                )
+            else:
+                if request.identifier_type == IdentifierType.PROJECT:
+                    containers = await self.docker_ops.discover_containers_by_project(request.container_identifier)
+                elif request.identifier_type == IdentifierType.NAME:
+                    containers = await self.docker_ops.discover_containers_by_name(request.container_identifier)
+                else:
+                    containers = await self.docker_ops.discover_containers_by_labels(request.label_filters)
+
+            if not containers:
+                raise ValueError(f"No containers found matching criteria")
+
+            # Extract volumes from all containers
+            all_volumes = []
+            for container in containers:
+                volumes = await self.docker_ops.get_container_volumes(container)
+                all_volumes.extend(volumes)
+
+            # Remove duplicates
+            unique_volumes = self._deduplicate_volumes(all_volumes)
+
+            # Get networks for project-based migrations
+            networks = []
+            if request.identifier_type == IdentifierType.PROJECT:
+                project_networks = await self.docker_ops.get_project_networks(request.container_identifier)
+                networks = [net.__dict__ for net in project_networks]
+
+            # Create migration status
+            self.active_migrations[migration_id] = MigrationStatus(
+                id=migration_id,
+                status="discovered",
+                progress=5,
+                message=f"Discovered {len(containers)} containers with {len(unique_volumes)} volumes",
+                compose_dataset=request.container_identifier,
+                source_host=request.source_host,
+                target_host=request.target_host,
+                target_base_path=request.target_base_path,
+                volumes=unique_volumes,
+                containers=[container.__dict__ for container in containers],
+                networks=networks
+            )
+
+            # Start migration process
+            asyncio.create_task(self._execute_container_migration(migration_id, request, containers, unique_volumes, networks))
+
+            logger.info(f"Started container migration {migration_id} for {request.container_identifier}")
+            return migration_id
+
+        except Exception as e:
+            error_msg = f"Failed to start container migration: {e}"
+            logger.error(error_msg)
+            
+            if migration_id in self.active_migrations:
+                await self._update_error(migration_id, error_msg)
+            
+            raise
+
+    async def _execute_container_migration(self, migration_id: str, request: ContainerMigrationRequest,
+                                         containers: List[ContainerInfo], volumes: List[VolumeMount],
+                                         networks: List[Dict[str, Any]]):
+        """Execute the complete container migration process"""
+        try:
+            # Step 1: Validate target host and storage
+            await self._update_status(migration_id, "validating", 10, "Validating target host and storage")
+            
+            # Validate Docker on target
+            docker_available = await self.docker_ops.validate_docker_on_target(
+                request.target_host, request.ssh_user, request.ssh_port
+            )
+            if not docker_available:
+                raise Exception(f"Docker not available on target host {request.target_host}")
+
+            # Storage validation (reuse existing logic)
+            target_host_info = HostInfo(
+                hostname=request.target_host,
+                ssh_user=request.ssh_user,
+                ssh_port=request.ssh_port
+            )
+            
+            storage_validation = await self.host_service.validate_storage_space(
+                target_host_info, volumes, request.target_base_path
+            )
+
+            failed_validations = {k: v for k, v in storage_validation.items() if not v.is_valid}
+            if failed_validations:
+                error_messages = [f"{location}: {result.error_message}" for location, result in failed_validations.items()]
+                raise Exception(f"Storage validation failed: {'; '.join(error_messages)}")
+
+            # Step 2: Stop containers
+            await self._update_status(migration_id, "stopping", 20, "Stopping containers")
+            
+            if request.source_host:
+                # Stop containers remotely
+                success = await self._stop_containers_remote(
+                    containers, request.source_host, request.source_ssh_user, request.source_ssh_port
+                )
+            else:
+                # Stop containers locally
+                success = await self.docker_ops.stop_containers(containers)
+            
+            if not success:
+                raise Exception("Failed to stop containers")
+
+            # Step 3: Create snapshots and migrate data
+            await self._update_status(migration_id, "migrating", 30, "Migrating container data")
+            
+            # Determine transfer method
+            target_has_zfs = await self.zfs_ops.check_remote_zfs(
+                request.target_host, request.ssh_user, request.ssh_port
+            )
+            source_has_zfs = request.source_host is None or await self.zfs_ops.check_remote_zfs(
+                request.source_host or "localhost"
+            )
+
+            use_zfs = target_has_zfs and source_has_zfs and not request.force_rsync
+            transfer_method = TransferMethod.ZFS_SEND if use_zfs else TransferMethod.RSYNC
+
+            # Create volume mapping
+            volume_mapping = {}
+            snapshots = []
+
+            for volume in volumes:
+                target_path = os.path.join(request.target_base_path, os.path.basename(volume.source))
+                volume_mapping[volume.source] = target_path
+
+                if use_zfs:
+                    # ZFS migration
+                    dataset_name = await self.zfs_ops.get_dataset_name(volume.source)
+                    snapshot_name = await self.zfs_ops.create_snapshot(volume.source)
+                    snapshots.append(snapshot_name)
+                    
+                    # Send snapshot to target
+                    success = await self.zfs_ops.send_snapshot(
+                        snapshot_name, request.target_host, target_path,
+                        request.ssh_user, request.ssh_port
+                    )
+                    if not success:
+                        raise Exception(f"Failed to send ZFS snapshot for {volume.source}")
+                else:
+                    # Rsync migration
+                    success = await self.transfer_ops.transfer_via_rsync(
+                        volume.source, request.target_host, target_path,
+                        request.ssh_user, request.ssh_port
+                    )
+                    if not success:
+                        raise Exception(f"Failed to rsync data for {volume.source}")
+
+            # Step 4: Pull images on target
+            await self._update_status(migration_id, "preparing", 60, "Pulling container images on target")
+            
+            unique_images = list(set(container.image for container in containers))
+            for image in unique_images:
+                success = await self.docker_ops.pull_image_on_target(
+                    image, request.target_host, request.ssh_user, request.ssh_port
+                )
+                if not success:
+                    logger.warning(f"Failed to pull image {image}, container creation may fail")
+
+            # Step 5: Create networks on target
+            await self._update_status(migration_id, "networks", 70, "Creating networks on target")
+            
+            for network_dict in networks:
+                # Convert dict back to NetworkInfo
+                network_info = NetworkInfo(**network_dict)
+                success = await self.docker_ops.create_network_on_target(
+                    network_info, request.target_host, request.ssh_user, request.ssh_port
+                )
+                if not success:
+                    logger.warning(f"Failed to create network {network_info.name}")
+
+            # Step 6: Recreate containers on target
+            await self._update_status(migration_id, "recreating", 80, "Recreating containers on target")
+            
+            success = await self.docker_ops.recreate_containers_on_target(
+                containers, volume_mapping, request.target_host, 
+                request.ssh_user, request.ssh_port
+            )
+            if not success:
+                raise Exception("Failed to recreate containers on target")
+
+            # Step 7: Connect containers to additional networks
+            await self._update_status(migration_id, "connecting", 90, "Connecting containers to networks")
+            
+            for container in containers:
+                if len(container.networks) > 1:
+                    success = await self.docker_ops.connect_container_to_networks(
+                        container.name, container.networks, request.target_host,
+                        request.ssh_user, request.ssh_port
+                    )
+                    if not success:
+                        logger.warning(f"Failed to connect {container.name} to additional networks")
+
+            # Step 8: Complete migration
+            await self._update_status(migration_id, "completed", 100, "Container migration completed successfully")
+
+            # Update migration status with final information
+            self.active_migrations[migration_id].transfer_method = transfer_method
+            self.active_migrations[migration_id].volume_mapping = volume_mapping
+            self.active_migrations[migration_id].snapshots = snapshots
+
+            logger.info(f"Container migration {migration_id} completed successfully")
+
+        except Exception as e:
+            await self._update_error(migration_id, str(e))
+            logger.exception(f"Container migration {migration_id} failed")
+
+    async def _stop_containers_remote(self, containers: List[ContainerInfo], 
+                                    target_host: str, ssh_user: str, ssh_port: int) -> bool:
+        """Stop containers on remote host"""
+        try:
+            for container in containers:
+                stop_cmd = f"docker stop {container.name}"
+                ssh_cmd = ["ssh", "-p", str(ssh_port), f"{ssh_user}@{target_host}", stop_cmd]
+                
+                returncode, stdout, stderr = await self.docker_ops._run_command(ssh_cmd)
+                if returncode != 0:
+                    logger.error(f"Failed to stop container {container.name} on {target_host}: {stderr}")
+                    return False
+                    
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to stop containers remotely: {e}")
+            return False
+
+    async def _discover_containers_remote(self, container_identifier: str, identifier_type: IdentifierType,
+                                        label_filters: Optional[Dict[str, str]], target_host: str,
+                                        ssh_user: str = "root", ssh_port: int = 22) -> List[ContainerInfo]:
+        """Discover containers on remote host"""
+        try:
+            if identifier_type == IdentifierType.PROJECT:
+                cmd = f"docker ps -a --filter label=com.docker.compose.project={container_identifier} --format json"
+            elif identifier_type == IdentifierType.NAME:
+                cmd = f"docker ps -a --filter name={container_identifier} --format json"
+            else:
+                # Build label filters
+                filter_args = " ".join([f"--filter label={k}={v}" for k, v in label_filters.items()])
+                cmd = f"docker ps -a {filter_args} --format json"
+
+            ssh_cmd = ["ssh", "-p", str(ssh_port), f"{ssh_user}@{target_host}", cmd]
+            returncode, stdout, stderr = await self.docker_ops._run_command(ssh_cmd)
+            
+            if returncode != 0:
+                raise Exception(f"Failed to list containers on {target_host}: {stderr}")
+
+            # Parse JSON output and convert to ContainerInfo objects
+            containers = []
+            for line in stdout.strip().split('\n'):
+                if line:
+                    container_data = json.loads(line)
+                    # Get detailed container info
+                    inspect_cmd = f"docker inspect {container_data['ID']}"
+                    ssh_inspect = ["ssh", "-p", str(ssh_port), f"{ssh_user}@{target_host}", inspect_cmd]
+                    
+                    ret, inspect_out, inspect_err = await self.docker_ops._run_command(ssh_inspect)
+                    if ret == 0:
+                        inspect_data = json.loads(inspect_out)[0]
+                        container_info = self._parse_remote_container_info(inspect_data)
+                        containers.append(container_info)
+
+            return containers
+
+        except Exception as e:
+            logger.error(f"Failed to discover containers on remote host: {e}")
+            raise
+
+    async def _get_containers_info_remote(self, container_identifier: str, identifier_type: IdentifierType,
+                                        label_filters: Optional[Dict[str, str]], target_host: str,
+                                        ssh_user: str = "root", ssh_port: int = 22) -> List[ContainerInfo]:
+        """Get detailed container information from remote host"""
+        return await self._discover_containers_remote(
+            container_identifier, identifier_type, label_filters, target_host, ssh_user, ssh_port
+        )
+
+    def _parse_remote_container_info(self, inspect_data: Dict[str, Any]) -> ContainerInfo:
+        """Parse container info from remote docker inspect output"""
+        # Parse environment variables
+        env_dict = {}
+        env_list = inspect_data['Config'].get('Env', [])
+        for env_var in env_list:
+            if '=' in env_var:
+                key, value = env_var.split('=', 1)
+                env_dict[key] = value
+
+        # Extract network information
+        networks = list(inspect_data['NetworkSettings']['Networks'].keys())
+
+        # Parse command
+        cmd = inspect_data['Config'].get('Cmd') or []
+        entrypoint = inspect_data['Config'].get('Entrypoint') or []
+        command = entrypoint + cmd if entrypoint else cmd
+
+        return ContainerInfo(
+            id=inspect_data['Id'],
+            name=inspect_data['Name'].lstrip('/'),
+            image=inspect_data['Config']['Image'],
+            image_id=inspect_data['Image'],
+            state=inspect_data['State']['Status'],
+            status=inspect_data['State']['Status'],
+            labels=inspect_data['Config'].get('Labels') or {},
+            mounts=inspect_data.get('Mounts', []),
+            networks=networks,
+            environment=env_dict,
+            ports=inspect_data['NetworkSettings'].get('Ports', {}),
+            command=command,
+            working_dir=inspect_data['Config'].get('WorkingDir', ''),
+            user=inspect_data['Config'].get('User', ''),
+            restart_policy=inspect_data['HostConfig'].get('RestartPolicy', {}),
+            created=inspect_data['Created'],
+            project_name=inspect_data['Config'].get('Labels', {}).get('com.docker.compose.project'),
+            service_name=inspect_data['Config'].get('Labels', {}).get('com.docker.compose.service')
+        )
+
+    def _deduplicate_volumes(self, volumes: List[VolumeMount]) -> List[VolumeMount]:
+        """Remove duplicate volume mounts"""
+        unique_volumes = []
+        seen_sources = set()
+        
+        for volume in volumes:
+            if volume.source not in seen_sources:
+                unique_volumes.append(volume)
+                seen_sources.add(volume.source)
+        
+        return unique_volumes
