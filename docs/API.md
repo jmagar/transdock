@@ -1,6 +1,6 @@
 # TransDock API Documentation
 
-The TransDock backend provides a RESTful API for managing Docker Compose stack migrations using ZFS snapshots.
+The TransDock backend provides a RESTful API for managing Docker Compose stack migrations using ZFS snapshots with full multi-host support.
 
 ## Base URL
 
@@ -28,6 +28,10 @@ TransDock includes comprehensive security validation to protect against:
 - **Input validation** - All API inputs are validated for format and content
 
 Security validation errors return `422 Unprocessable Entity` status codes with descriptive error messages.
+
+## Multi-Host Architecture
+
+TransDock supports full multi-host operations where both source and destination can be any host accessible via SSH. No more hardcoded paths in configuration files - everything is specified dynamically via API calls.
 
 ## Endpoints
 
@@ -71,21 +75,167 @@ Get detailed system information.
 }
 ```
 
-### ZFS Operations
+### Multi-Host Operations
 
-#### GET /zfs/status
-Check ZFS availability and pool status.
+#### POST /api/hosts/validate
+Validate host capabilities and discover available paths.
+
+**Request Body:**
+```json
+{
+  "hostname": "remote-server.local",
+  "ssh_user": "root",
+  "ssh_port": 22
+}
+```
 
 **Response:**
 ```json
 {
-  "available": true,
-  "pool_status": "pool: cache\n state: ONLINE\n..."
+  "hostname": "remote-server.local",
+  "docker_available": true,
+  "zfs_available": true,
+  "compose_paths": [
+    "/mnt/cache/compose",
+    "/mnt/user/compose"
+  ],
+  "appdata_paths": [
+    "/mnt/cache/appdata",
+    "/mnt/user/appdata"
+  ],
+  "zfs_pools": [
+    "cache",
+    "backup"
+  ],
+  "error": null
 }
 ```
 
-#### GET /datasets
-List available ZFS datasets.
+#### GET /api/hosts/{hostname}/capabilities
+Get detailed host capabilities.
+
+**Parameters:**
+- `hostname` (path): Target hostname
+- `ssh_user` (query): SSH username
+- `ssh_port` (query): SSH port (default: 22)
+
+**Response:**
+```json
+{
+  "hostname": "remote-server.local",
+  "docker_available": true,
+  "zfs_available": true,
+  "compose_paths": ["/mnt/cache/compose"],
+  "appdata_paths": ["/mnt/cache/appdata"],
+  "zfs_pools": ["cache"]
+}
+```
+
+#### GET /api/hosts/{hostname}/compose/stacks
+List Docker Compose stacks on remote host.
+
+**Parameters:**
+- `hostname` (path): Target hostname
+- `compose_path` (query): Compose directory path
+- `ssh_user` (query): SSH username
+- `ssh_port` (query): SSH port (default: 22)
+
+**Response:**
+```json
+{
+  "stacks": [
+    {
+      "name": "authelia",
+      "path": "/mnt/cache/compose/authelia",
+      "compose_file": "/mnt/cache/compose/authelia/docker-compose.yml",
+      "services": ["authelia", "redis", "postgres"],
+      "status": "running"
+    },
+    {
+      "name": "nextcloud",
+      "path": "/mnt/cache/compose/nextcloud",
+      "compose_file": "/mnt/cache/compose/nextcloud/docker-compose.yaml",
+      "services": ["nextcloud", "mariadb"],
+      "status": "stopped"
+    }
+  ]
+}
+```
+
+#### GET /api/hosts/{hostname}/compose/stacks/{stack_name}
+Analyze a specific stack on remote host.
+
+**Parameters:**
+- `hostname` (path): Target hostname
+- `stack_name` (path): Stack name
+- `compose_path` (query): Compose directory path
+- `ssh_user` (query): SSH username
+- `ssh_port` (query): SSH port (default: 22)
+
+**Response:**
+```json
+{
+  "stack_name": "authelia",
+  "stack_path": "/mnt/cache/compose/authelia",
+  "compose_file": "/mnt/cache/compose/authelia/docker-compose.yml",
+  "volumes": [
+    {
+      "source": "/mnt/cache/appdata/authelia",
+      "target": "/config",
+      "dataset_path": "cache/appdata/authelia",
+      "is_dataset": true
+    }
+  ],
+  "services": ["authelia", "redis", "postgres"],
+  "status": "running"
+}
+```
+
+#### POST /api/hosts/{hostname}/compose/stacks/{stack_name}/start
+Start a Docker Compose stack on remote host.
+
+**Parameters:**
+- `hostname` (path): Target hostname
+- `stack_name` (path): Stack name
+- `compose_path` (query): Compose directory path
+- `ssh_user` (query): SSH username
+- `ssh_port` (query): SSH port (default: 22)
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Stack 'authelia' started successfully",
+  "stack_name": "authelia"
+}
+```
+
+#### POST /api/hosts/{hostname}/compose/stacks/{stack_name}/stop
+Stop a Docker Compose stack on remote host.
+
+**Parameters:**
+- `hostname` (path): Target hostname
+- `stack_name` (path): Stack name
+- `compose_path` (query): Compose directory path
+- `ssh_user` (query): SSH username
+- `ssh_port` (query): SSH port (default: 22)
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Stack 'authelia' stopped successfully",
+  "stack_name": "authelia"
+}
+```
+
+#### GET /api/hosts/{hostname}/datasets
+List ZFS datasets on remote host.
+
+**Parameters:**
+- `hostname` (path): Target hostname
+- `ssh_user` (query): SSH username
+- `ssh_port` (query): SSH port (default: 22)
 
 **Response:**
 ```json
@@ -103,10 +253,42 @@ List available ZFS datasets.
 }
 ```
 
-### Docker Compose Operations
+### Local ZFS Operations
+
+#### GET /zfs/status
+Check ZFS availability and pool status.
+
+**Response:**
+```json
+{
+  "available": true,
+  "pool_status": "pool: cache\n state: ONLINE\n..."
+}
+```
+
+#### GET /datasets
+List available ZFS datasets on local host.
+
+**Response:**
+```json
+{
+  "datasets": [
+    {
+      "name": "cache/appdata",
+      "mountpoint": "/mnt/cache/appdata"
+    },
+    {
+      "name": "cache/compose",
+      "mountpoint": "/mnt/cache/compose"
+    }
+  ]
+}
+```
+
+### Local Docker Compose Operations
 
 #### GET /compose/stacks
-List available Docker Compose stacks.
+List available Docker Compose stacks on local host.
 
 **Response:**
 ```json
@@ -127,7 +309,7 @@ List available Docker Compose stacks.
 ```
 
 #### POST /compose/{stack_name}/analyze
-Analyze a compose stack and return volume information.
+Analyze a compose stack on local host and return volume information.
 
 **Parameters:**
 - `stack_name` (path): Name of the compose stack
@@ -153,7 +335,7 @@ Analyze a compose stack and return volume information.
 ### Migration Operations
 
 #### POST /migrations
-Start a new migration process with comprehensive security validation.
+Start a new migration process with multi-host support.
 
 **Request Body:**
 ```json
@@ -163,16 +345,48 @@ Start a new migration process with comprehensive security validation.
   "target_base_path": "/home/jmagar",
   "ssh_user": "root",
   "ssh_port": 22,
-  "force_rsync": false
+  "force_rsync": false,
+  "source_host": "192.168.1.50",
+  "source_ssh_user": "root",
+  "source_ssh_port": 22,
+  "source_compose_path": "/mnt/cache/compose",
+  "source_appdata_path": "/mnt/cache/appdata",
+  "transfer_method": "auto"
+}
+```
+
+**Multi-Host Migration Examples:**
+
+*Local to Remote:*
+```json
+{
+  "compose_dataset": "authelia",
+  "target_host": "remote-server.local",
+  "target_base_path": "/opt/docker",
+  "ssh_user": "root"
+}
+```
+
+*Remote to Remote:*
+```json
+{
+  "compose_dataset": "authelia",
+  "target_host": "dest-server.local",
+  "target_base_path": "/home/docker",
+  "ssh_user": "root",
+  "source_host": "source-server.local",
+  "source_ssh_user": "root",
+  "source_compose_path": "/mnt/cache/compose",
+  "source_appdata_path": "/mnt/cache/appdata"
 }
 ```
 
 **Security Validation:**
 - `compose_dataset`: Validated for path traversal and injection attacks
-- `target_host`: Validated against hostname patterns, prevents command injection
+- `target_host`/`source_host`: Validated against hostname patterns, prevents command injection
 - `target_base_path`: Sanitized for path traversal prevention
-- `ssh_user`: Validated against username patterns
-- `ssh_port`: Validated for valid port range (1-65535)
+- `ssh_user`/`source_ssh_user`: Validated against username patterns
+- `ssh_port`/`source_ssh_port`: Validated for valid port range (1-65535)
 
 **Response:**
 ```json
@@ -197,6 +411,7 @@ List all migrations.
     "compose_dataset": "authelia",
     "target_host": "192.168.1.100",
     "target_base_path": "/home/jmagar",
+    "source_host": "192.168.1.50",
     "volumes": [...],
     "transfer_method": "zfs_send",
     "error": null
@@ -220,6 +435,7 @@ Get the status of a specific migration.
   "compose_dataset": "authelia",
   "target_host": "192.168.1.100",
   "target_base_path": "/home/jmagar",
+  "source_host": "192.168.1.50",
   "volumes": [
     {
       "source": "/mnt/cache/appdata/authelia",
@@ -277,6 +493,17 @@ Migration status can be one of:
 
 - `zfs_send` - Uses ZFS send/receive for efficient block-level transfer
 - `rsync` - Uses rsync for file-level transfer (fallback when target lacks ZFS)
+- `auto` - Automatically chooses the best method based on host capabilities
+
+## Multi-Host Transfer Support
+
+TransDock supports all combinations of source and destination hosts:
+- **Local to Remote**: Migrate from local host to remote host
+- **Remote to Local**: Migrate from remote host to local host  
+- **Remote to Remote**: Migrate between two remote hosts
+- **Local to Local**: Migrate within the same host (path changes)
+
+Both ZFS and rsync transfer methods work across all host combinations.
 
 ## Error Handling
 
