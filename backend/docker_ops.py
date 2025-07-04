@@ -69,11 +69,31 @@ class DockerOperations:
             except:
                 pass
     
-    async def discover_containers_by_project(self, project_name: str) -> List[ContainerInfo]:
+    def get_docker_client(self, host: Optional[str] = None, ssh_user: str = "root") -> docker.DockerClient:
+        """Get Docker client for local or remote host"""
+        if host:
+            # Create remote Docker client via SSH
+            base_url = f"ssh://{ssh_user}@{host}"
+            try:
+                remote_client = docker.DockerClient(base_url=base_url)
+                # Test connection
+                remote_client.ping()
+                logger.info(f"Remote Docker API connection established to {host}")
+                return remote_client
+            except DockerException as e:
+                logger.error(f"Failed to connect to remote Docker API at {host}: {e}")
+                raise
+        else:
+            return self.client  # Local client
+    
+    async def discover_containers_by_project(self, project_name: str, 
+                                           host: Optional[str] = None, 
+                                           ssh_user: str = "root") -> List[ContainerInfo]:
         """Discover all containers belonging to a Docker Compose project"""
         try:
+            client = self.get_docker_client(host, ssh_user)
             containers = []
-            all_containers = self.client.containers.list(all=True)
+            all_containers = client.containers.list(all=True)
             
             for container in all_containers:
                 labels = container.labels
@@ -85,44 +105,63 @@ class DockerOperations:
                     container_info.service_name = labels.get('com.docker.compose.service')
                     containers.append(container_info)
             
-            logger.info(f"Discovered {len(containers)} containers for project '{project_name}'")
+            logger.info(f"Discovered {len(containers)} containers for project '{project_name}' on {host or 'localhost'}")
+            
+            # Clean up remote client
+            if host:
+                client.close()
+            
             return containers
             
         except DockerException as e:
             logger.error(f"Failed to discover containers for project {project_name}: {e}")
             raise
     
-    async def discover_containers_by_name(self, name_pattern: str) -> List[ContainerInfo]:
+    async def discover_containers_by_name(self, name_pattern: str,
+                                        host: Optional[str] = None,
+                                        ssh_user: str = "root") -> List[ContainerInfo]:
         """Discover containers by name pattern matching"""
         try:
+            client = self.get_docker_client(host, ssh_user)
             containers = []
-            all_containers = self.client.containers.list(all=True)
+            all_containers = client.containers.list(all=True)
             
             for container in all_containers:
                 if name_pattern.lower() in container.name.lower():
                     containers.append(self._extract_container_info(container))
             
-            logger.info(f"Discovered {len(containers)} containers matching pattern '{name_pattern}'")
+            logger.info(f"Discovered {len(containers)} containers matching pattern '{name_pattern}' on {host or 'localhost'}")
+            
+            # Clean up remote client
+            if host:
+                client.close()
+            
             return containers
             
         except DockerException as e:
             logger.error(f"Failed to discover containers by name pattern {name_pattern}: {e}")
             raise
     
-    async def discover_containers_by_labels(self, label_filters: Dict[str, str]) -> List[ContainerInfo]:
+    async def discover_containers_by_labels(self, label_filters: Dict[str, str],
+                                          host: Optional[str] = None,
+                                          ssh_user: str = "root") -> List[ContainerInfo]:
         """Discover containers by label filters"""
         try:
+            client = self.get_docker_client(host, ssh_user)
             containers = []
-            filters = {f"label={key}={value}" for key, value in label_filters.items()}
-            
-            filtered_containers = self.client.containers.list(all=True, filters={"label": list(label_filters.keys())})
+            filtered_containers = client.containers.list(all=True, filters={"label": list(label_filters.keys())})
             
             for container in filtered_containers:
                 # Verify all label filters match
                 if all(container.labels.get(key) == value for key, value in label_filters.items()):
                     containers.append(self._extract_container_info(container))
             
-            logger.info(f"Discovered {len(containers)} containers matching label filters")
+            logger.info(f"Discovered {len(containers)} containers matching label filters on {host or 'localhost'}")
+            
+            # Clean up remote client
+            if host:
+                client.close()
+            
             return containers
             
         except DockerException as e:
@@ -179,36 +218,48 @@ class DockerOperations:
             logger.error(f"Failed to extract container info for {container.name}: {e}")
             raise
     
-    async def get_container_volumes(self, container_info: ContainerInfo) -> List[VolumeMount]:
+    async def get_container_volumes(self, container_info: ContainerInfo,
+                                  host: Optional[str] = None,
+                                  ssh_user: str = "root") -> List[VolumeMount]:
         """Extract volume mounts from container information"""
+        client = self.get_docker_client(host, ssh_user)
         volume_mounts = []
         
-        for mount in container_info.mounts:
-            if mount['Type'] == 'bind':
-                volume_mount = VolumeMount(
-                    source=mount['Source'],
-                    target=mount['Destination']
-                )
-                volume_mounts.append(volume_mount)
-            elif mount['Type'] == 'volume':
-                # Handle named volumes by getting their mount point
-                try:
-                    volume = self.client.volumes.get(mount['Name'])
+        try:
+            for mount in container_info.mounts:
+                if mount['Type'] == 'bind':
                     volume_mount = VolumeMount(
-                        source=volume.attrs['Mountpoint'],
+                        source=mount['Source'],
                         target=mount['Destination']
                     )
                     volume_mounts.append(volume_mount)
-                except NotFound:
-                    logger.warning(f"Named volume {mount['Name']} not found")
-        
-        return volume_mounts
+                elif mount['Type'] == 'volume':
+                    # Handle named volumes by getting their mount point
+                    try:
+                        volume = client.volumes.get(mount['Name'])
+                        volume_mount = VolumeMount(
+                            source=volume.attrs['Mountpoint'],
+                            target=mount['Destination']
+                        )
+                        volume_mounts.append(volume_mount)
+                    except NotFound:
+                        logger.warning(f"Named volume {mount['Name']} not found")
+            
+            return volume_mounts
+            
+        finally:
+            # Clean up remote client
+            if host:
+                client.close()
     
-    async def get_project_networks(self, project_name: str) -> List[NetworkInfo]:
+    async def get_project_networks(self, project_name: str,
+                                 host: Optional[str] = None,
+                                 ssh_user: str = "root") -> List[NetworkInfo]:
         """Get all networks associated with a Docker Compose project"""
         try:
+            client = self.get_docker_client(host, ssh_user)
             networks = []
-            all_networks = self.client.networks.list()
+            all_networks = client.networks.list()
             
             for network in all_networks:
                 labels = network.attrs.get('Labels') or {}
@@ -230,23 +281,32 @@ class DockerOperations:
                     )
                     networks.append(network_info)
             
-            logger.info(f"Found {len(networks)} networks for project '{project_name}'")
+            logger.info(f"Found {len(networks)} networks for project '{project_name}' on {host or 'localhost'}")
+            
+            # Clean up remote client
+            if host:
+                client.close()
+            
             return networks
             
         except DockerException as e:
             logger.error(f"Failed to get networks for project {project_name}: {e}")
             raise
     
-    async def stop_containers(self, container_infos: List[ContainerInfo], timeout: int = 10) -> bool:
+    async def stop_containers(self, container_infos: List[ContainerInfo], 
+                            timeout: int = 10,
+                            host: Optional[str] = None,
+                            ssh_user: str = "root") -> bool:
         """Stop multiple containers gracefully"""
         try:
+            client = self.get_docker_client(host, ssh_user)
             stopped_count = 0
             
             for container_info in container_infos:
                 try:
-                    container = self.client.containers.get(container_info.id)
+                    container = client.containers.get(container_info.id)
                     if container.status == 'running':
-                        logger.info(f"Stopping container {container_info.name}")
+                        logger.info(f"Stopping container {container_info.name} on {host or 'localhost'}")
                         container.stop(timeout=timeout)
                         stopped_count += 1
                     else:
@@ -257,22 +317,31 @@ class DockerOperations:
                     logger.error(f"Failed to stop container {container_info.name}: {e}")
                     return False
             
-            logger.info(f"Successfully stopped {stopped_count} containers")
+            logger.info(f"Successfully stopped {stopped_count} containers on {host or 'localhost'}")
+            
+            # Clean up remote client
+            if host:
+                client.close()
+            
             return True
             
         except Exception as e:
             logger.error(f"Failed to stop containers: {e}")
             return False
     
-    async def remove_containers(self, container_infos: List[ContainerInfo], force: bool = False) -> bool:
+    async def remove_containers(self, container_infos: List[ContainerInfo], 
+                              force: bool = False,
+                              host: Optional[str] = None,
+                              ssh_user: str = "root") -> bool:
         """Remove multiple containers"""
         try:
+            client = self.get_docker_client(host, ssh_user)
             removed_count = 0
             
             for container_info in container_infos:
                 try:
-                    container = self.client.containers.get(container_info.id)
-                    logger.info(f"Removing container {container_info.name}")
+                    container = client.containers.get(container_info.id)
+                    logger.info(f"Removing container {container_info.name} on {host or 'localhost'}")
                     container.remove(force=force)
                     removed_count += 1
                 except NotFound:
@@ -281,7 +350,12 @@ class DockerOperations:
                     logger.error(f"Failed to remove container {container_info.name}: {e}")
                     return False
             
-            logger.info(f"Successfully removed {removed_count} containers")
+            logger.info(f"Successfully removed {removed_count} containers on {host or 'localhost'}")
+            
+            # Clean up remote client
+            if host:
+                client.close()
+            
             return True
             
         except Exception as e:
@@ -290,39 +364,39 @@ class DockerOperations:
     
     async def create_network_on_target(self, network_info: NetworkInfo, target_host: str, 
                                      ssh_user: str = "root", ssh_port: int = 22) -> bool:
-        """Create a Docker network on the target host"""
+        """Create a Docker network on the target host using Docker API"""
         try:
-            # Build docker network create command
-            cmd_parts = ["docker", "network", "create"]
+            client = self.get_docker_client(target_host, ssh_user)
             
-            # Add driver
-            cmd_parts.extend(["--driver", network_info.driver])
-            
-            # Add labels
-            for key, value in network_info.labels.items():
-                cmd_parts.extend(["--label", f"{key}={value}"])
-            
-            # Add options
-            for key, value in network_info.options.items():
-                cmd_parts.extend(["--opt", f"{key}={value}"])
-            
-            # Add network name
-            cmd_parts.append(network_info.name)
-            
-            # Execute on remote host
-            ssh_cmd = [
-                "ssh", "-p", str(ssh_port), f"{ssh_user}@{target_host}",
-                " ".join(cmd_parts)
-            ]
-            
-            returncode, stdout, stderr = await self._run_command(ssh_cmd)
-            if returncode == 0:
-                logger.info(f"Created network {network_info.name} on {target_host}")
+            # Check if network already exists
+            try:
+                existing_network = client.networks.get(network_info.name)
+                logger.info(f"Network {network_info.name} already exists on {target_host}")
+                client.close()
                 return True
-            else:
-                logger.error(f"Failed to create network {network_info.name}: {stderr}")
-                return False
+            except NotFound:
+                pass  # Network doesn't exist, create it
+            
+            # Create network using Docker API
+            network_config = {
+                'name': network_info.name,
+                'driver': network_info.driver,
+                'labels': network_info.labels,
+                'options': network_info.options,
+                'attachable': network_info.attachable,
+                'ingress': network_info.ingress,
+                'internal': network_info.internal
+            }
+            
+            created_network = client.networks.create(**network_config)
+            logger.info(f"Created network {network_info.name} on {target_host}")
+            
+            client.close()
+            return True
                 
+        except DockerException as e:
+            logger.error(f"Failed to create network {network_info.name} on {target_host}: {e}")
+            return False
         except Exception as e:
             logger.error(f"Failed to create network on target: {e}")
             return False
@@ -330,43 +404,50 @@ class DockerOperations:
     async def recreate_containers_on_target(self, container_infos: List[ContainerInfo], 
                                           volume_mapping: Dict[str, str], target_host: str,
                                           ssh_user: str = "root", ssh_port: int = 22) -> bool:
-        """Recreate containers on target host with updated volume paths"""
+        """Recreate containers on target host with updated volume paths using Docker API"""
         try:
+            client = self.get_docker_client(target_host, ssh_user)
             success_count = 0
             
             for container_info in container_infos:
-                docker_run_cmd = self._generate_docker_run_command(container_info, volume_mapping)
-                
-                # Execute on remote host
-                ssh_cmd = [
-                    "ssh", "-p", str(ssh_port), f"{ssh_user}@{target_host}",
-                    docker_run_cmd
-                ]
-                
-                returncode, stdout, stderr = await self._run_command(ssh_cmd)
-                if returncode == 0:
+                try:
+                    # Build container configuration
+                    container_config = self._build_container_config(container_info, volume_mapping)
+                    
+                    # Create and start container
+                    container = client.containers.run(**container_config)
                     logger.info(f"Successfully recreated container {container_info.name} on {target_host}")
                     success_count += 1
-                else:
-                    logger.error(f"Failed to recreate container {container_info.name}: {stderr}")
+                    
+                except DockerException as e:
+                    logger.error(f"Failed to recreate container {container_info.name}: {e}")
+                    client.close()
                     return False
             
-            logger.info(f"Successfully recreated {success_count} containers on target")
+            logger.info(f"Successfully recreated {success_count} containers on {target_host}")
+            client.close()
             return True
             
         except Exception as e:
             logger.error(f"Failed to recreate containers on target: {e}")
             return False
     
-    def _generate_docker_run_command(self, container_info: ContainerInfo, 
-                                   volume_mapping: Dict[str, str]) -> str:
-        """Generate docker run command from container information"""
-        cmd_parts = ["docker", "run", "-d"]
-        
-        # Add name
-        cmd_parts.extend(["--name", container_info.name])
+    def _build_container_config(self, container_info: ContainerInfo, 
+                               volume_mapping: Dict[str, str]) -> Dict[str, Any]:
+        """Build container configuration for Docker API"""
+        config = {
+            'image': container_info.image,
+            'name': container_info.name,
+            'detach': True,
+            'environment': container_info.environment,
+            'labels': container_info.labels,
+            'command': container_info.command if container_info.command else None,
+            'working_dir': container_info.working_dir if container_info.working_dir else None,
+            'user': container_info.user if container_info.user else None,
+        }
         
         # Add volumes with updated paths
+        volumes = {}
         for mount in container_info.mounts:
             if mount['Type'] == 'bind':
                 old_source = mount['Source']
@@ -374,127 +455,123 @@ class DockerOperations:
                 destination = mount['Destination']
                 
                 # Add read-only flag if present
-                if mount.get('RW', True) is False:
-                    cmd_parts.extend(["-v", f"{new_source}:{destination}:ro"])
-                else:
-                    cmd_parts.extend(["-v", f"{new_source}:{destination}"])
+                mode = 'ro' if mount.get('RW', True) is False else 'rw'
+                volumes[new_source] = {'bind': destination, 'mode': mode}
+        
+        if volumes:
+            config['volumes'] = volumes
         
         # Add ports
+        ports = {}
+        port_bindings = {}
         for container_port, host_configs in container_info.ports.items():
             if host_configs:
                 for host_config in host_configs:
                     host_port = host_config['HostPort']
                     host_ip = host_config.get('HostIp', '')
+                    
                     if host_ip:
-                        cmd_parts.extend(["-p", f"{host_ip}:{host_port}:{container_port}"])
+                        port_bindings[container_port] = [(host_ip, host_port)]
                     else:
-                        cmd_parts.extend(["-p", f"{host_port}:{container_port}"])
+                        port_bindings[container_port] = host_port
+                    
+                    ports[container_port] = None
         
-        # Add environment variables
-        for key, value in container_info.environment.items():
-            # Escape shell special characters
-            escaped_value = SecurityUtils.escape_shell_argument(value)
-            cmd_parts.extend(["-e", f"{key}={escaped_value}"])
-        
-        # Add labels
-        for key, value in container_info.labels.items():
-            escaped_value = SecurityUtils.escape_shell_argument(value)
-            cmd_parts.extend(["--label", f"{key}={escaped_value}"])
+        if ports:
+            config['ports'] = ports
+        if port_bindings:
+            config['port_bindings'] = port_bindings
         
         # Add restart policy
         restart_policy = container_info.restart_policy
         if restart_policy.get('Name') and restart_policy['Name'] != 'no':
             policy_name = restart_policy['Name']
             if policy_name == 'on-failure' and restart_policy.get('MaximumRetryCount'):
-                cmd_parts.extend(["--restart", f"{policy_name}:{restart_policy['MaximumRetryCount']}"])
+                config['restart_policy'] = {
+                    'Name': policy_name,
+                    'MaximumRetryCount': restart_policy['MaximumRetryCount']
+                }
             else:
-                cmd_parts.extend(["--restart", policy_name])
+                config['restart_policy'] = {'Name': policy_name}
         
-        # Add working directory
-        if container_info.working_dir:
-            cmd_parts.extend(["-w", container_info.working_dir])
-        
-        # Add user
-        if container_info.user:
-            cmd_parts.extend(["-u", container_info.user])
-        
-        # Add networks (only first network, others added via docker network connect)
+        # Add networks (only first network, others added separately)
         if container_info.networks and container_info.networks[0] != 'bridge':
-            cmd_parts.extend(["--network", container_info.networks[0]])
+            config['network'] = container_info.networks[0]
         
-        # Add image
-        cmd_parts.append(container_info.image)
-        
-        # Add command
-        if container_info.command:
-            cmd_parts.extend(container_info.command)
-        
-        return " ".join(cmd_parts)
+        return config
     
     async def connect_container_to_networks(self, container_name: str, networks: List[str],
                                           target_host: str, ssh_user: str = "root", 
                                           ssh_port: int = 22) -> bool:
-        """Connect container to additional networks on target host"""
+        """Connect container to additional networks on target host using Docker API"""
         try:
+            client = self.get_docker_client(target_host, ssh_user)
+            
             # Skip the first network (already connected during creation)
             additional_networks = networks[1:] if len(networks) > 1 else []
             
-            for network in additional_networks:
-                if network == 'bridge':
+            for network_name in additional_networks:
+                if network_name == 'bridge':
                     continue
                     
-                connect_cmd = f"docker network connect {network} {container_name}"
-                ssh_cmd = [
-                    "ssh", "-p", str(ssh_port), f"{ssh_user}@{target_host}",
-                    connect_cmd
-                ]
-                
-                returncode, stdout, stderr = await self._run_command(ssh_cmd)
-                if returncode != 0:
-                    logger.error(f"Failed to connect {container_name} to network {network}: {stderr}")
+                try:
+                    network = client.networks.get(network_name)
+                    container = client.containers.get(container_name)
+                    network.connect(container)
+                    logger.info(f"Connected {container_name} to network {network_name}")
+                except NotFound as e:
+                    logger.error(f"Network {network_name} or container {container_name} not found: {e}")
+                    client.close()
+                    return False
+                except DockerException as e:
+                    logger.error(f"Failed to connect {container_name} to network {network_name}: {e}")
+                    client.close()
                     return False
             
+            client.close()
             return True
             
         except Exception as e:
             logger.error(f"Failed to connect container to networks: {e}")
             return False
     
-    async def _run_command(self, cmd: List[str], cwd: Optional[str] = None) -> Tuple[int, str, str]:
-        """Run a command asynchronously"""
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd
-            )
-            stdout, stderr = await process.communicate()
-            returncode = process.returncode if process.returncode is not None else 1
-            return returncode, stdout.decode(), stderr.decode()
-        except Exception as e:
-            logger.error(f"Command failed: {' '.join(cmd)} - {e}")
-            return 1, "", str(e)
-    
-    async def get_container_by_name(self, name: str) -> Optional[ContainerInfo]:
+    async def get_container_by_name(self, name: str,
+                                  host: Optional[str] = None,
+                                  ssh_user: str = "root") -> Optional[ContainerInfo]:
         """Get container information by exact name"""
         try:
-            container = self.client.containers.get(name)
-            return self._extract_container_info(container)
+            client = self.get_docker_client(host, ssh_user)
+            container = client.containers.get(name)
+            container_info = self._extract_container_info(container)
+            
+            # Clean up remote client
+            if host:
+                client.close()
+            
+            return container_info
         except NotFound:
+            if host:
+                client.close()
             return None
         except DockerException as e:
             logger.error(f"Failed to get container {name}: {e}")
             raise
     
-    async def list_all_containers(self, include_stopped: bool = True) -> List[ContainerInfo]:
+    async def list_all_containers(self, include_stopped: bool = True,
+                                host: Optional[str] = None,
+                                ssh_user: str = "root") -> List[ContainerInfo]:
         """List all containers on the system"""
         try:
+            client = self.get_docker_client(host, ssh_user)
             containers = []
-            all_containers = self.client.containers.list(all=include_stopped)
+            all_containers = client.containers.list(all=include_stopped)
             
             for container in all_containers:
                 containers.append(self._extract_container_info(container))
+            
+            # Clean up remote client
+            if host:
+                client.close()
             
             return containers
             
@@ -504,45 +581,42 @@ class DockerOperations:
     
     async def pull_image_on_target(self, image: str, target_host: str, 
                                  ssh_user: str = "root", ssh_port: int = 22) -> bool:
-        """Pull Docker image on target host"""
+        """Pull Docker image on target host using Docker API"""
         try:
-            pull_cmd = f"docker pull {image}"
-            ssh_cmd = [
-                "ssh", "-p", str(ssh_port), f"{ssh_user}@{target_host}",
-                pull_cmd
-            ]
+            client = self.get_docker_client(target_host, ssh_user)
             
-            returncode, stdout, stderr = await self._run_command(ssh_cmd)
-            if returncode == 0:
-                logger.info(f"Successfully pulled image {image} on {target_host}")
-                return True
-            else:
-                logger.error(f"Failed to pull image {image}: {stderr}")
-                return False
+            # Pull image using Docker API
+            pulled_image = client.images.pull(image)
+            logger.info(f"Successfully pulled image {image} on {target_host}")
+            
+            client.close()
+            return True
                 
+        except DockerException as e:
+            logger.error(f"Failed to pull image {image} on {target_host}: {e}")
+            return False
         except Exception as e:
             logger.error(f"Failed to pull image on target: {e}")
             return False
     
     async def validate_docker_on_target(self, target_host: str, ssh_user: str = "root", 
                                       ssh_port: int = 22) -> bool:
-        """Validate Docker is available and accessible on target host"""
+        """Validate Docker is available and accessible on target host using Docker API"""
         try:
-            version_cmd = "docker version --format '{{.Server.Version}}'"
-            ssh_cmd = [
-                "ssh", "-p", str(ssh_port), f"{ssh_user}@{target_host}",
-                version_cmd
-            ]
+            client = self.get_docker_client(target_host, ssh_user)
             
-            returncode, stdout, stderr = await self._run_command(ssh_cmd)
-            if returncode == 0:
-                version = stdout.strip()
-                logger.info(f"Docker {version} available on {target_host}")
-                return True
-            else:
-                logger.error(f"Docker not available on {target_host}: {stderr}")
-                return False
+            # Test connection and get version
+            client.ping()
+            version_info = client.version()
+            version = version_info.get('Version', 'unknown')
+            
+            logger.info(f"Docker {version} available on {target_host}")
+            client.close()
+            return True
                 
+        except DockerException as e:
+            logger.error(f"Docker not available on {target_host}: {e}")
+            return False
         except Exception as e:
             logger.error(f"Failed to validate Docker on target: {e}")
             return False
