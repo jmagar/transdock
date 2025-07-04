@@ -188,30 +188,34 @@ class ZFSOperations:
             returncode, stdout, stderr = await self.run_command(check_ssh_cmd)
             if returncode == 0:
                 dataset_exists = True
-                # Extract mount path from ZFS list output
-                if stdout.strip():
-                    # ZFS list output format: name mountpoint
-                    parts = stdout.strip().split('\t')
-                    if len(parts) >= 2 and parts[1] != '-':
-                        dataset_mount_path = parts[1]
+                logger.info(f"Target dataset {target_dataset} exists")
+                
+                # Get the actual mount path using zfs get mountpoint
+                get_mountpoint_cmd = SecurityUtils.validate_zfs_command_args("get", "-H", "-o", "value", "mountpoint", target_dataset)
+                get_mountpoint_cmd_str = " ".join(get_mountpoint_cmd)
+                mountpoint_ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, get_mountpoint_cmd_str)
+                
+                mp_returncode, mp_stdout, mp_stderr = await self.run_command(mountpoint_ssh_cmd)
+                if mp_returncode == 0 and mp_stdout.strip():
+                    dataset_mount_path = mp_stdout.strip()
+                    if dataset_mount_path == "none" or dataset_mount_path == "-":
+                        logger.info(f"Target dataset {target_dataset} is not mounted")
+                        dataset_mount_path = None
                     else:
-                        # Fallback: construct mount path
-                        dataset_mount_path = f"/mnt/{target_dataset}"
+                        logger.info(f"Target dataset {target_dataset} is mounted at {dataset_mount_path}")
+                        
+                        # Try to force unmount the dataset if it's busy
+                        logger.info(f"Attempting to force unmount {dataset_mount_path} to prevent busy errors")
+                        unmount_success = await self.force_unmount_dataset(
+                            target_host, dataset_mount_path, ssh_user, ssh_port
+                        )
+                        if unmount_success:
+                            logger.info(f"Successfully prepared {target_dataset} for overwrite")
+                        else:
+                            logger.warning(f"Could not force unmount {dataset_mount_path}, will try -F flag anyway")
                 else:
-                    # Fallback: construct mount path
-                    dataset_mount_path = f"/mnt/{target_dataset}"
-                
-                logger.info(f"Target dataset {target_dataset} exists at {dataset_mount_path}")
-                
-                # Try to force unmount the dataset if it's busy
-                logger.info(f"Attempting to force unmount {dataset_mount_path} to prevent busy errors")
-                unmount_success = await self.force_unmount_dataset(
-                    target_host, dataset_mount_path, ssh_user, ssh_port
-                )
-                if unmount_success:
-                    logger.info(f"Successfully prepared {target_dataset} for overwrite")
-                else:
-                    logger.warning(f"Could not force unmount {dataset_mount_path}, will try -F flag anyway")
+                    logger.warning(f"Could not get mountpoint for {target_dataset}: {mp_stderr}")
+                    dataset_mount_path = None
             else:
                 logger.info(f"Target dataset {target_dataset} does not exist")
                 
@@ -368,17 +372,28 @@ class ZFSOperations:
                 logger.info(f"Path {dataset_path} is not mounted on {target_host}")
                 return True  # Not mounted, so unmount "succeeded"
             
-            # Step 2: Try to find processes using the dataset
+            # Step 2: Use lsof to find processes with open files in the dataset
+            logger.info(f"Finding processes with open files in {dataset_path}")
+            lsof_cmd = SecurityUtils.validate_system_command_args("lsof", "+D", dataset_path)
+            lsof_cmd_str = " ".join(lsof_cmd)
+            ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, lsof_cmd_str)
+            
+            returncode, lsof_stdout, lsof_stderr = await self.run_command(ssh_cmd)
+            if returncode == 0 and lsof_stdout.strip():
+                logger.warning(f"Found processes with open files in {dataset_path}:")
+                logger.warning(lsof_stdout.strip())
+            
+            # Step 3: Use fuser to find processes using the dataset
             logger.info(f"Finding processes using {dataset_path} on {target_host}")
             fuser_cmd = SecurityUtils.validate_system_command_args("fuser", "-mv", dataset_path)
             fuser_cmd_str = " ".join(fuser_cmd)
             ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, fuser_cmd_str)
             
-            returncode, stdout, stderr = await self.run_command(ssh_cmd)
-            if returncode == 0 and stdout.strip():
-                logger.warning(f"Found processes using {dataset_path}: {stdout.strip()}")
+            returncode, fuser_stdout, fuser_stderr = await self.run_command(ssh_cmd)
+            if returncode == 0 and fuser_stdout.strip():
+                logger.warning(f"Found processes using {dataset_path}: {fuser_stdout.strip()}")
                 
-                # Step 3: Kill processes using the dataset (SIGTERM first)
+                # Step 4: Kill processes using the dataset (SIGTERM first)
                 logger.info(f"Attempting to kill processes using {dataset_path} with SIGTERM")
                 fuser_kill_cmd = SecurityUtils.validate_system_command_args("fuser", "-km", dataset_path)
                 fuser_kill_cmd_str = " ".join(fuser_kill_cmd)
@@ -387,22 +402,25 @@ class ZFSOperations:
                 await self.run_command(ssh_cmd)
                 
                 # Wait a moment for processes to exit
-                await asyncio.sleep(2)
+                logger.info("Waiting for processes to exit gracefully...")
+                await asyncio.sleep(3)
                 
-                # Step 4: If still busy, use SIGKILL
-                logger.info(f"Attempting to kill processes using {dataset_path} with SIGKILL")
-                fuser_kill9_cmd = SecurityUtils.validate_system_command_args("fuser", "-9km", dataset_path)
-                fuser_kill9_cmd_str = " ".join(fuser_kill9_cmd)
-                ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, fuser_kill9_cmd_str)
-                
-                await self.run_command(ssh_cmd)
-                
-                # Wait for cleanup
-                await asyncio.sleep(1)
+                # Step 5: Check if any processes are still there
+                returncode, fuser_stdout, _ = await self.run_command(ssh_cmd)
+                if returncode == 0 and fuser_stdout.strip():
+                    logger.warning(f"Some processes still using {dataset_path}, using SIGKILL")
+                    fuser_kill9_cmd = SecurityUtils.validate_system_command_args("fuser", "-9km", dataset_path)
+                    fuser_kill9_cmd_str = " ".join(fuser_kill9_cmd)
+                    ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, fuser_kill9_cmd_str)
+                    
+                    await self.run_command(ssh_cmd)
+                    
+                    # Wait for cleanup
+                    await asyncio.sleep(2)
             
-            # Step 5: Try to unmount forcefully
-            logger.info(f"Attempting to unmount {dataset_path} on {target_host}")
-            umount_cmd = SecurityUtils.validate_system_command_args("umount", "-f", dataset_path)
+            # Step 6: Try to unmount gracefully first
+            logger.info(f"Attempting graceful unmount of {dataset_path}")
+            umount_cmd = SecurityUtils.validate_system_command_args("umount", dataset_path)
             umount_cmd_str = " ".join(umount_cmd)
             ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, umount_cmd_str)
             
@@ -410,8 +428,30 @@ class ZFSOperations:
             if returncode == 0:
                 logger.info(f"Successfully unmounted {dataset_path} on {target_host}")
                 return True
+            
+            # Step 7: Try force unmount
+            logger.info(f"Graceful unmount failed, attempting force unmount of {dataset_path}")
+            umount_force_cmd = SecurityUtils.validate_system_command_args("umount", "-f", dataset_path)
+            umount_force_cmd_str = " ".join(umount_force_cmd)
+            ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, umount_force_cmd_str)
+            
+            returncode, stdout, stderr = await self.run_command(ssh_cmd)
+            if returncode == 0:
+                logger.info(f"Successfully force unmounted {dataset_path} on {target_host}")
+                return True
+            
+            # Step 8: Last resort - lazy unmount
+            logger.warning(f"Force unmount failed, trying lazy unmount of {dataset_path}")
+            umount_lazy_cmd = SecurityUtils.validate_system_command_args("umount", "-l", dataset_path)
+            umount_lazy_cmd_str = " ".join(umount_lazy_cmd)
+            ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, umount_lazy_cmd_str)
+            
+            returncode, stdout, stderr = await self.run_command(ssh_cmd)
+            if returncode == 0:
+                logger.info(f"Successfully lazy unmounted {dataset_path} on {target_host}")
+                return True
             else:
-                logger.warning(f"Failed to unmount {dataset_path} on {target_host}: {stderr}")
+                logger.error(f"All unmount attempts failed for {dataset_path}: {stderr}")
                 return False
                 
         except SecurityValidationError as e:
