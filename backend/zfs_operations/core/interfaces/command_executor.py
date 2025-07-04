@@ -1,6 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 from dataclasses import dataclass
+
+if TYPE_CHECKING:
+    from ..value_objects.ssh_config import SSHConfig
 
 
 @dataclass

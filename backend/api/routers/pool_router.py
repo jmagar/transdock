@@ -1,19 +1,16 @@
 """
 Pool API router using the new service layer.
 """
-from typing import Dict, Any, List, Optional
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends, Query
-from fastapi.responses import JSONResponse
 
 from ..dependencies import get_pool_service
 from ..models import (
     PoolScrubRequest, PoolResponse, 
     PoolListResponse, APIResponse
 )
-from ..middleware import create_success_response, create_error_response
+
 from ...zfs_operations.services.pool_service import PoolService
-from ...zfs_operations.core.exceptions.zfs_exceptions import ZFSException
-from ...zfs_operations.core.exceptions.validation_exceptions import ValidationException
 
 
 router = APIRouter(prefix="/api/v1/pools", tags=["pools"])
@@ -40,7 +37,7 @@ async def list_pools(
                 detail=f"Failed to list pools: {result.error}"
             )
     except Exception as e:
-        return create_error_response(e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{pool_name}", response_model=PoolResponse)
@@ -63,7 +60,7 @@ async def get_pool(
                 detail=f"Pool not found: {result.error}"
             )
     except Exception as e:
-        return create_error_response(e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{pool_name}/health", response_model=APIResponse)
@@ -86,7 +83,7 @@ async def get_pool_health(
                 detail=f"Failed to get pool health: {result.error}"
             )
     except Exception as e:
-        return create_error_response(e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{pool_name}/iostat", response_model=APIResponse)
@@ -111,7 +108,7 @@ async def get_pool_iostat(
                 detail=f"Failed to get pool iostat: {result.error}"
             )
     except Exception as e:
-        return create_error_response(e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/{pool_name}/scrub", response_model=APIResponse)
@@ -143,7 +140,7 @@ async def manage_pool_scrub(
                 detail=f"Failed to {request.action} scrub: {result.error}"
             )
     except Exception as e:
-        return create_error_response(e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{pool_name}/history", response_model=APIResponse)
@@ -166,7 +163,7 @@ async def get_pool_history(
                 detail=f"Failed to get pool history: {result.error}"
             )
     except Exception as e:
-        return create_error_response(e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/{pool_name}/export", response_model=APIResponse)
@@ -190,7 +187,7 @@ async def export_pool(
                 detail=f"Failed to export pool: {result.error}"
             )
     except Exception as e:
-        return create_error_response(e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/{pool_name}/import", response_model=APIResponse)
@@ -216,4 +213,4 @@ async def import_pool(
                 detail=f"Failed to import pool: {result.error}"
             )
     except Exception as e:
-        return create_error_response(e) 
+        raise HTTPException(status_code=500, detail=str(e)) 

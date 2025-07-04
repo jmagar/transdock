@@ -2,7 +2,7 @@
 Concrete implementation of security validator interface.
 """
 import re
-from typing import List, Optional, Dict
+from typing import List, Dict, Tuple
 from ..core.interfaces.security_validator import ISecurityValidator
 from ..core.value_objects.ssh_config import SSHConfig
 from ..core.exceptions.validation_exceptions import (
@@ -127,9 +127,9 @@ class SecurityValidator(ISecurityValidator):
             if not isinstance(config.key_file, str):
                 raise SecurityValidationError("Key file path must be a string")
             
-            # Check for path traversal
-            if '..' in config.key_file or config.key_file.startswith('/'):
-                raise SecurityValidationError("Key file path contains dangerous elements")
+            # Check for path traversal attempts
+            if '..' in config.key_file:
+                raise SecurityValidationError("Key file path contains path traversal attempts")
         
         return config
     
@@ -169,7 +169,7 @@ class SecurityValidator(ISecurityValidator):
         
         return port
     
-    def validate_zfs_property(self, property_name: str, value: str) -> tuple[str, str]:
+    def validate_zfs_property(self, property_name: str, value: str) -> Tuple[str, str]:
         """Validate ZFS property name and value."""
         if not property_name or not isinstance(property_name, str):
             raise SecurityValidationError("Property name cannot be empty or non-string")

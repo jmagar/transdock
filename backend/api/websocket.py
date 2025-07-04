@@ -11,17 +11,17 @@ This module provides WebSocket functionality including:
 
 import json
 import asyncio
+import uuid
 from typing import Dict, List, Any, Optional, Set
 from datetime import datetime
 from enum import Enum
-from fastapi import WebSocket, WebSocketDisconnect, Depends, HTTPException, status
+from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.routing import APIRouter
 from pydantic import BaseModel, Field
 from collections import defaultdict
 import logging
 
 from .auth import User, JWTManager, UserManager
-from .dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class WebSocketMessage(BaseModel):
     event_type: EventType
     data: Dict[str, Any]
     timestamp: datetime = Field(default_factory=datetime.utcnow)
-    message_id: str = Field(default_factory=lambda: f"msg_{int(datetime.utcnow().timestamp() * 1000)}")
+    message_id: str = Field(default_factory=lambda: f"msg_{uuid.uuid4().hex}")
     user_id: Optional[str] = None
 
 class ConnectionManager:
@@ -71,11 +71,13 @@ class ConnectionManager:
         self.connection_users: Dict[str, str] = {}
         self.subscriptions: Dict[str, Set[EventType]] = defaultdict(set)
         self.connection_counter = 0
+        self._counter_lock = asyncio.Lock()
     
-    def _generate_connection_id(self) -> str:
-        """Generate unique connection ID"""
-        self.connection_counter += 1
-        return f"conn_{self.connection_counter}"
+    async def _generate_connection_id(self) -> str:
+        """Generate unique connection ID with thread safety"""
+        async with self._counter_lock:
+            self.connection_counter += 1
+            return f"conn_{self.connection_counter}"
     
     async def connect(self, websocket: WebSocket, user: Optional[User] = None) -> str:
         """
@@ -90,7 +92,7 @@ class ConnectionManager:
         """
         await websocket.accept()
         
-        connection_id = self._generate_connection_id()
+        connection_id = await self._generate_connection_id()
         self.active_connections[connection_id] = websocket
         
         if user:
@@ -508,25 +510,25 @@ async def emit_migration_progress(migration_id: str, progress: int, status: str,
         }
     )
 
-async def emit_zfs_event(event_type: EventType, dataset_name: str, details: Dict[str, Any] = None):
+async def emit_zfs_event(event_type: EventType, dataset_name: str, details: Optional[Dict[str, Any]] = None):
     """Emit ZFS-related event"""
     data = {
         "dataset_name": dataset_name,
         "timestamp": datetime.utcnow().isoformat()
     }
-    if details:
+    if details is not None:
         data.update(details)
     
     await event_broadcaster.emit(event_type, data)
 
-async def emit_system_alert(level: str, message: str, details: Dict[str, Any] = None):
+async def emit_system_alert(level: str, message: str, details: Optional[Dict[str, Any]] = None):
     """Emit system alert"""
     data = {
         "level": level,
         "message": message,
         "timestamp": datetime.utcnow().isoformat()
     }
-    if details:
+    if details is not None:
         data.update(details)
     
     event_type = EventType.SYSTEM_ALERT if level == "error" else EventType.WARNING if level == "warning" else EventType.INFO

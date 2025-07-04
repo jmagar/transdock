@@ -1,12 +1,11 @@
 import pytest
 import asyncio
 from unittest.mock import Mock, AsyncMock, patch
-from datetime import datetime
-from typing import Dict, Any, List
+from datetime import datetime, timedelta
 
 from backend.zfs_operations.services.pool_service import PoolService
-from backend.zfs_operations.core.entities.pool import Pool
-from backend.zfs_operations.core.entities.vdev import VDev
+from backend.zfs_operations.core.entities.pool import Pool, PoolState, VDev
+from backend.zfs_operations.core.entities.vdev import Vdev
 from backend.zfs_operations.core.value_objects.size_value import SizeValue
 from backend.zfs_operations.core.exceptions.zfs_exceptions import (
     PoolException,
@@ -36,6 +35,8 @@ class TestPoolService:
         validator = Mock()
         validator.validate_dataset_name = Mock(side_effect=lambda x: x)
         validator.validate_zfs_command = Mock(side_effect=lambda cmd, args: args)
+        validator.validate_pool_name = Mock(return_value=True)
+        validator.validate_vdev_spec = Mock(return_value=True)
         return validator
     
     @pytest.fixture
@@ -60,17 +61,16 @@ class TestPoolService:
     @pytest.fixture
     def sample_pool(self):
         """Create sample pool for testing."""
+        # Create a sample vdev
         vdev = VDev(
             name="raidz1-0",
             type="raidz1",
-            state="ONLINE",
-            devices=["/dev/sda", "/dev/sdb", "/dev/sdc"]
+            state="ONLINE"
         )
         
         return Pool(
             name="pool1",
-            state="ONLINE",
-            health="ONLINE",
+            state=PoolState.ONLINE,
             size=SizeValue(10000000000),
             allocated=SizeValue(5000000000),
             free=SizeValue(5000000000),

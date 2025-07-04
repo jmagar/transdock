@@ -1,8 +1,8 @@
 """
 Service factory for dependency injection and service creation.
 """
+import asyncio
 from typing import Dict, Any, Optional
-import logging
 
 from ..core.interfaces.command_executor import ICommandExecutor
 from ..core.interfaces.security_validator import ISecurityValidator
@@ -22,6 +22,7 @@ class ServiceFactory:
         """Initialize the service factory with configuration."""
         self._config = config or {}
         self._logger_instances: Dict[str, ILogger] = {}
+        self._lock = asyncio.Lock()
         
         # Initialize shared dependencies
         self._executor: ICommandExecutor = CommandExecutor(
@@ -29,64 +30,66 @@ class ServiceFactory:
         )
         self._validator: ISecurityValidator = SecurityValidator()
     
-    def create_dataset_service(self) -> DatasetService:
+    async def create_dataset_service(self) -> DatasetService:
         """Create a DatasetService instance with injected dependencies."""
-        logger = self._get_logger("dataset_service")
+        logger = await self._get_logger("dataset_service")
         return DatasetService(
             executor=self._executor,
             validator=self._validator,
             logger=logger
         )
     
-    def create_snapshot_service(self) -> SnapshotService:
+    async def create_snapshot_service(self) -> SnapshotService:
         """Create a SnapshotService instance with injected dependencies."""
-        logger = self._get_logger("snapshot_service")
+        logger = await self._get_logger("snapshot_service")
         return SnapshotService(
             executor=self._executor,
             validator=self._validator,
             logger=logger
         )
     
-    def create_pool_service(self) -> PoolService:
+    async def create_pool_service(self) -> PoolService:
         """Create a PoolService instance with injected dependencies."""
-        logger = self._get_logger("pool_service")
+        logger = await self._get_logger("pool_service")
         return PoolService(
             executor=self._executor,
             validator=self._validator,
             logger=logger
         )
     
-    def create_all_services(self) -> Dict[str, Any]:
+    async def create_all_services(self) -> Dict[str, Any]:
         """Create all services and return them as a dictionary."""
         return {
-            'dataset_service': self.create_dataset_service(),
-            'snapshot_service': self.create_snapshot_service(),
-            'pool_service': self.create_pool_service()
+            'dataset_service': await self.create_dataset_service(),
+            'snapshot_service': await self.create_snapshot_service(),
+            'pool_service': await self.create_pool_service()
         }
     
-    def _get_logger(self, service_name: str) -> ILogger:
+    async def _get_logger(self, service_name: str) -> ILogger:
         """Get or create a logger instance for a service."""
-        if service_name not in self._logger_instances:
-            self._logger_instances[service_name] = StructuredLogger(
-                name=service_name,
-                level=self._config.get('log_level', 'INFO')
-            )
-        return self._logger_instances[service_name]
+        async with self._lock:
+            if service_name not in self._logger_instances:
+                self._logger_instances[service_name] = StructuredLogger(
+                    name=service_name,
+                    level=self._config.get('log_level', 'INFO')
+                )
+            return self._logger_instances[service_name]
     
     def get_config(self) -> Dict[str, Any]:
         """Get the current configuration."""
         return self._config.copy()
     
-    def update_config(self, new_config: Dict[str, Any]):
+    async def update_config(self, new_config: Dict[str, Any]):
         """Update the configuration and reinitialize dependencies."""
-        self._config.update(new_config)
-        # Reinitialize dependencies with new config
-        self._executor = CommandExecutor(
-            timeout=self._config.get('command_timeout', 30)
-        )
-        self._validator = SecurityValidator()
-        # Clear logger instances to force recreation with new config
-        self._logger_instances.clear()
+        async with self._lock:
+            self._config.update(new_config)
+            # Reinitialize dependencies with new config
+            self._executor = CommandExecutor(
+                timeout=self._config.get('command_timeout', 30)
+            )
+            self._validator = SecurityValidator()
+            # Clear logger instances to force recreation with new config
+            self._logger_instances.clear()
 
 
 class ServiceFactoryBuilder:

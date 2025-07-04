@@ -11,7 +11,7 @@ from ..zfs_operations.factories.service_factory import ServiceFactory, create_de
 from ..zfs_operations.services.dataset_service import DatasetService
 from ..zfs_operations.services.snapshot_service import SnapshotService
 from ..zfs_operations.services.pool_service import PoolService
-from .auth import JWTManager, UserManager, User, AuthorizationManager
+from .auth import JWTManager, UserManager, User, AuthorizationManager, invalidate_token
 
 
 # Global service factory instance
@@ -27,33 +27,27 @@ def get_service_factory() -> ServiceFactory:
     return _service_factory
 
 
-def get_dataset_service() -> DatasetService:
+async def get_dataset_service() -> DatasetService:
     """Get a DatasetService instance."""
-    return get_service_factory().create_dataset_service()
+    return await get_service_factory().create_dataset_service()
 
 
-def get_snapshot_service() -> SnapshotService:
+async def get_snapshot_service() -> SnapshotService:
     """Get a SnapshotService instance."""
-    return get_service_factory().create_snapshot_service()
+    return await get_service_factory().create_snapshot_service()
 
 
-def get_pool_service() -> PoolService:
+async def get_pool_service() -> PoolService:
     """Get a PoolService instance."""
-    return get_service_factory().create_pool_service()
+    return await get_service_factory().create_pool_service()
 
 
-def get_legacy_adapter() -> LegacyAdapter:
-    """Get a LegacyAdapter instance."""
-    return LegacyAdapter(get_service_factory())
-
-
-def get_all_services() -> Dict[str, Any]:
+async def get_all_services() -> Dict[str, Any]:
     """Get all services as a dictionary."""
     return {
-        'dataset_service': get_dataset_service(),
-        'snapshot_service': get_snapshot_service(),
-        'pool_service': get_pool_service(),
-        'legacy_adapter': get_legacy_adapter()
+        'dataset_service': await get_dataset_service(),
+        'snapshot_service': await get_snapshot_service(),
+        'pool_service': await get_pool_service()
     }
 
 
@@ -151,6 +145,28 @@ async def get_current_active_user(current_user: User = Depends(get_current_user)
             detail="Inactive user account"
         )
     return current_user
+
+
+async def get_token_from_request(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    """
+    Dependency to extract the raw JWT token from the request.
+    
+    Args:
+        credentials: HTTP authorization credentials
+    
+    Returns:
+        str: Raw JWT token
+    
+    Raises:
+        HTTPException: If no token is provided
+    """
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No token provided",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return credentials.credentials
 
 
 def require_roles(required_roles: List[str]):

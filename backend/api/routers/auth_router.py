@@ -8,22 +8,47 @@ This module provides authentication endpoints including:
 - User profile management
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials
+
 from pydantic import BaseModel
 
 from ..auth import (
-    User, UserLogin, UserCreate, Token, 
+    User, UserInDB, UserLogin, UserCreate, Token, 
     UserManager, JWTManager, create_tokens_for_user,
-    PasswordManager, AuthorizationManager
+    PasswordManager, invalidate_token, get_blacklist_stats
 )
 from ..dependencies import (
-    get_current_user, get_current_active_user, 
-    require_admin, require_user, security
+    get_current_active_user, get_token_from_request,
+    require_admin
 )
+from ..rate_limiting import rate_limit
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+def _user_from_db(user_db: UserInDB) -> User:
+    """
+    Convert UserInDB instance to User instance.
+    
+    This helper function reduces code duplication by centralizing the conversion
+    of UserInDB objects (which include sensitive data like hashed passwords)
+    to User objects (which are safe for API responses).
+    
+    Args:
+        user_db: UserInDB instance from the database
+        
+    Returns:
+        User: User instance suitable for API responses
+    """
+    return User(
+        username=user_db.username,
+        email=user_db.email,
+        full_name=user_db.full_name,
+        roles=user_db.roles,
+        is_active=user_db.is_active,
+        created_at=user_db.created_at,
+        last_login=user_db.last_login
+    )
 
 class LoginResponse(BaseModel):
     """Login response model"""
@@ -48,6 +73,7 @@ class UserUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
 
 @router.post("/login", response_model=LoginResponse)
+@rate_limit(config_name='auth')
 async def login(user_credentials: UserLogin):
     """
     Authenticate user and return JWT tokens.
@@ -79,15 +105,7 @@ async def login(user_credentials: UserLogin):
         tokens = create_tokens_for_user(user)
         
         # Convert to User model (without password)
-        user_response = User(
-            username=user.username,
-            email=user.email,
-            full_name=user.full_name,
-            roles=user.roles,
-            is_active=user.is_active,
-            created_at=user.created_at,
-            last_login=user.last_login
-        )
+        user_response = _user_from_db(user)
         
         return LoginResponse(
             user=user_response,
@@ -101,7 +119,7 @@ async def login(user_credentials: UserLogin):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Login failed: {str(e)}"
-        )
+        ) from e
 
 @router.post("/refresh", response_model=Token)
 async def refresh_token(refresh_request: RefreshTokenRequest):
@@ -143,6 +161,9 @@ async def refresh_token(refresh_request: RefreshTokenRequest):
                 detail="User not found or inactive"
             )
         
+        # Blacklist the old refresh token to prevent reuse
+        invalidate_token(refresh_request.refresh_token)
+        
         # Create new tokens
         tokens = create_tokens_for_user(user)
         return tokens
@@ -153,7 +174,7 @@ async def refresh_token(refresh_request: RefreshTokenRequest):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Token refresh failed: {str(e)}"
-        )
+        ) from e
 
 @router.get("/me", response_model=User)
 async def get_current_user_info(current_user: User = Depends(get_current_active_user)):
@@ -209,15 +230,7 @@ async def update_current_user(
                 detail="User not found"
             )
         
-        return User(
-            username=updated_user.username,
-            email=updated_user.email,
-            full_name=updated_user.full_name,
-            roles=updated_user.roles,
-            is_active=updated_user.is_active,
-            created_at=updated_user.created_at,
-            last_login=updated_user.last_login
-        )
+        return _user_from_db(updated_user)
     
     except HTTPException:
         raise
@@ -225,7 +238,7 @@ async def update_current_user(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"User update failed: {str(e)}"
-        )
+        ) from e
 
 @router.post("/change-password")
 async def change_password(
@@ -261,11 +274,13 @@ async def change_password(
                 detail="Current password is incorrect"
             )
         
-        # Validate new password strength
-        if not PasswordManager.validate_password_strength(password_change.new_password):
+        # Validate new password strength with detailed error messages
+        password_errors = PasswordManager.get_password_validation_errors(password_change.new_password)
+        if password_errors:
+            error_message = "Password validation failed. Please ensure your password meets the following requirements: " + "; ".join(password_errors)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="New password does not meet strength requirements"
+                detail=error_message
             )
         
         # Update password
@@ -284,7 +299,7 @@ async def change_password(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Password change failed: {str(e)}"
-        )
+        ) from e
 
 # Admin-only endpoints
 @router.get("/users", response_model=List[User])
@@ -305,7 +320,7 @@ async def list_users(current_user: User = Depends(require_admin())):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to list users: {str(e)}"
-        )
+        ) from e
 
 @router.post("/users", response_model=User)
 async def create_user(
@@ -327,20 +342,12 @@ async def create_user(
     """
     try:
         new_user = UserManager.create_user(user_data)
-        return User(
-            username=new_user.username,
-            email=new_user.email,
-            full_name=new_user.full_name,
-            roles=new_user.roles,
-            is_active=new_user.is_active,
-            created_at=new_user.created_at,
-            last_login=new_user.last_login
-        )
+        return _user_from_db(new_user)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"User creation failed: {str(e)}"
-        )
+        ) from e
 
 @router.get("/users/{username}", response_model=User)
 async def get_user(
@@ -368,22 +375,14 @@ async def get_user(
                 detail="User not found"
             )
         
-        return User(
-            username=user.username,
-            email=user.email,
-            full_name=user.full_name,
-            roles=user.roles,
-            is_active=user.is_active,
-            created_at=user.created_at,
-            last_login=user.last_login
-        )
+        return _user_from_db(user)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get user: {str(e)}"
-        )
+        ) from e
 
 @router.put("/users/{username}", response_model=User)
 async def update_user(
@@ -425,15 +424,7 @@ async def update_user(
                 detail="User not found"
             )
         
-        return User(
-            username=updated_user.username,
-            email=updated_user.email,
-            full_name=updated_user.full_name,
-            roles=updated_user.roles,
-            is_active=updated_user.is_active,
-            created_at=updated_user.created_at,
-            last_login=updated_user.last_login
-        )
+        return _user_from_db(updated_user)
     
     except HTTPException:
         raise
@@ -441,7 +432,7 @@ async def update_user(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"User update failed: {str(e)}"
-        )
+        ) from e
 
 @router.delete("/users/{username}")
 async def delete_user(
@@ -484,24 +475,52 @@ async def delete_user(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"User deletion failed: {str(e)}"
-        )
+        ) from e
 
 @router.post("/logout")
-async def logout(current_user: User = Depends(get_current_active_user)):
+async def logout(
+    current_user: User = Depends(get_current_active_user),
+    token: str = Depends(get_token_from_request)
+):
     """
-    Logout user (invalidate token).
+    Logout user and invalidate token.
+    
+    This endpoint properly invalidates the JWT token by adding it to a blacklist,
+    ensuring that the token cannot be used for future authentication.
     
     Args:
         current_user: Current authenticated user
+        token: JWT token to invalidate
     
     Returns:
-        Dict: Success message
+        Dict: Success message with invalidation status
     
-    Note:
-        In a production environment, you would typically maintain a blacklist
-        of invalidated tokens or use shorter token expiration times.
+    Raises:
+        HTTPException: If token invalidation fails
     """
-    return {"message": "Logged out successfully"}
+    try:
+        # Invalidate the token by adding it to the blacklist
+        success = invalidate_token(token)
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to invalidate token"
+            )
+        
+        return {
+            "message": "Logged out successfully",
+            "user": current_user.username,
+            "token_invalidated": True
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Logout failed: {str(e)}"
+        ) from e
 
 @router.get("/validate")
 async def validate_token(current_user: User = Depends(get_current_active_user)):
@@ -519,4 +538,30 @@ async def validate_token(current_user: User = Depends(get_current_active_user)):
         "user": current_user.username,
         "roles": current_user.roles,
         "message": "Token is valid"
-    } 
+    }
+
+@router.get("/blacklist-stats")
+async def get_token_blacklist_stats(current_user: User = Depends(require_admin())):
+    """
+    Get token blacklist statistics (admin only).
+    
+    This endpoint provides information about the current state of the token blacklist,
+    including the number of blacklisted tokens and cleanup status.
+    
+    Args:
+        current_user: Current authenticated admin user
+    
+    Returns:
+        Dict: Blacklist statistics
+    """
+    try:
+        stats = get_blacklist_stats()
+        return {
+            "blacklist_stats": stats,
+            "message": "Blacklist statistics retrieved successfully"
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get blacklist stats: {str(e)}"
+        ) from e 

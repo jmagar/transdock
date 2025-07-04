@@ -13,7 +13,7 @@ This module contains tests for the new API layer including:
 import pytest
 import asyncio
 from fastapi.testclient import TestClient
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import Mock, AsyncMock
 
 # Import the main application
 from ..main import app

@@ -1,10 +1,9 @@
 """
 Pydantic models for API request/response validation.
 """
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field, validator
 from datetime import datetime
-from enum import Enum
 
 
 class APIResponse(BaseModel):

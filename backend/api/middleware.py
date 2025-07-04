@@ -2,7 +2,7 @@
 Middleware for API error handling and common functionality.
 """
 from typing import Dict, Any, Optional
-from fastapi import Request, Response
+from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 import logging

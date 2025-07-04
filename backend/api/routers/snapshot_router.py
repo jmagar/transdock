@@ -1,20 +1,18 @@
 """
 Snapshot API router using the new service layer.
 """
-from typing import Dict, Any, List, Optional
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends, Query
-from fastapi.responses import JSONResponse
 
 from ..dependencies import get_snapshot_service
 from ..models import (
     SnapshotCreateRequest, SnapshotResponse, 
     SnapshotListResponse, APIResponse
 )
-from ..middleware import create_success_response, create_error_response
+from ..middleware import create_error_response
 from ...zfs_operations.services.snapshot_service import SnapshotService
 from ...zfs_operations.core.value_objects.dataset_name import DatasetName
-from ...zfs_operations.core.exceptions.zfs_exceptions import ZFSException
-from ...zfs_operations.core.exceptions.validation_exceptions import ValidationException
+
 
 
 router = APIRouter(prefix="/api/v1/snapshots", tags=["snapshots"])

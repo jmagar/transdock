@@ -3,7 +3,7 @@ Pool domain entity with health monitoring and management capabilities.
 """
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from ..value_objects.size_value import SizeValue
 
@@ -243,7 +243,7 @@ class Pool:
         if not last_scrub:
             return True
         
-        days_since_scrub = (datetime.utcnow() - last_scrub).days
+        days_since_scrub = (datetime.now(timezone.utc) - last_scrub).days
         return days_since_scrub > days
     
     def get_resilver_status(self) -> Optional[Dict[str, Any]]:

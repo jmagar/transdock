@@ -1,13 +1,10 @@
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-import logging
-import asyncio
 
 from ..core.interfaces.command_executor import ICommandExecutor
 from ..core.interfaces.security_validator import ISecurityValidator  
 from ..core.interfaces.logger_interface import ILogger
-from ..core.entities.pool import Pool
-from ..core.entities.pool import VDev
+from ..core.entities.pool import Pool, PoolState, VDev
 from ..core.value_objects.size_value import SizeValue
 from ..core.exceptions.zfs_exceptions import (
     PoolException, 
@@ -61,9 +58,16 @@ class PoolService:
                 **capacity_result.value
             }
             
+            # Convert state string to PoolState enum
+            state_str = pool_data.get('state', PoolState.ONLINE.value)
+            try:
+                pool_state = PoolState(state_str)
+            except ValueError:
+                pool_state = PoolState.ONLINE  # Default to ONLINE if unknown state
+            
             pool = Pool(
                 name=pool_name,
-                state=pool_data.get('state', 'ONLINE'),  # Use PoolState enum value
+                state=pool_state,
                 size=pool_data.get('size', SizeValue(0)),
                 allocated=pool_data.get('allocated', SizeValue(0)),
                 free=pool_data.get('free', SizeValue(0)),
@@ -91,7 +95,7 @@ class PoolService:
             # Execute zpool list command
             result = await self._executor.execute_system("zpool", "list", "-H", "-o", "name,size,alloc,free,ckpoint,expandsz,frag,cap,dedup,health,altroot")
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(PoolException(
                     f"Failed to list pools: {result.stderr}",
                     error_code="POOL_LIST_FAILED"
@@ -173,7 +177,7 @@ class PoolService:
                 return Result.failure(pool_result.error)
             
             pool = pool_result.value
-            if pool.state != "ONLINE":
+            if pool.state != PoolState.ONLINE:
                 return Result.failure(PoolUnavailableError(
                     f"Pool {pool_name} is not online (state: {pool.state})"
                 ))
@@ -189,7 +193,7 @@ class PoolService:
             # Start scrub
             result = await self._executor.execute_system("zpool", "scrub", pool_name)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(PoolException(
                     f"Failed to start scrub: {result.stderr}",
                     error_code="SCRUB_START_FAILED"
@@ -229,7 +233,7 @@ class PoolService:
             # Stop scrub
             result = await self._executor.execute_system("zpool", "scrub", "-s", pool_name)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(PoolException(
                     f"Failed to stop scrub: {result.stderr}",
                     error_code="SCRUB_STOP_FAILED"
@@ -267,7 +271,7 @@ class PoolService:
             # Execute iostat command
             result = await self._executor.execute_system("zpool", *command_args)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(PoolException(
                     f"Failed to get I/O statistics: {result.stderr}",
                     error_code="IOSTAT_FAILED"
@@ -278,7 +282,7 @@ class PoolService:
             if iostat_data.is_failure:
                 return Result.failure(iostat_data.error)
             
-            self._logger.info(f"Successfully retrieved I/O statistics")
+            self._logger.info("Successfully retrieved I/O statistics")
             return Result.success(iostat_data.value)
             
         except Exception as e:
@@ -312,7 +316,7 @@ class PoolService:
             # Execute export command
             result = await self._executor.execute_system("zpool", *command_args)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(PoolException(
                     f"Failed to export pool: {result.stderr}",
                     error_code="POOL_EXPORT_FAILED"
@@ -358,7 +362,7 @@ class PoolService:
             # Execute import command
             result = await self._executor.execute_system("zpool", *command_args)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(PoolException(
                     f"Failed to import pool: {result.stderr}",
                     error_code="POOL_IMPORT_FAILED"
@@ -387,7 +391,7 @@ class PoolService:
             # Execute history command
             result = await self._executor.execute_system("zpool", "history", "-l", pool_name)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(PoolException(
                     f"Failed to get pool history: {result.stderr}",
                     error_code="POOL_HISTORY_FAILED"
@@ -429,7 +433,7 @@ class PoolService:
         try:
             result = await self._executor.execute_system("zpool", "status", pool_name)
             
-            if not result.is_success:
+            if not result.success:
                 if "no such pool" in result.stderr.lower():
                     return Result.failure(PoolNotFoundError(pool_name))
                 return Result.failure(PoolException(
@@ -450,7 +454,7 @@ class PoolService:
         try:
             result = await self._executor.execute_system("zpool", "get", "-H", "all", pool_name)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(PoolException(
                     f"Failed to get pool properties: {result.stderr}",
                     error_code="POOL_PROPERTIES_FAILED"
@@ -476,7 +480,7 @@ class PoolService:
         try:
             result = await self._executor.execute_system("zpool", "list", "-H", "-o", "size,alloc,free,cap,frag", pool_name)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(PoolException(
                     f"Failed to get pool capacity: {result.stderr}",
                     error_code="POOL_CAPACITY_FAILED"
@@ -517,7 +521,7 @@ class PoolService:
         try:
             result = await self._executor.execute_system("zpool", "status", "-v", pool_name)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(PoolException(
                     f"Failed to get detailed pool status: {result.stderr}",
                     error_code="POOL_DETAILED_STATUS_FAILED"
@@ -536,7 +540,7 @@ class PoolService:
         try:
             result = await self._executor.execute_system("zpool", "status", "-x", pool_name)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(PoolException(
                     f"Failed to get pool errors: {result.stderr}",
                     error_code="POOL_ERRORS_FAILED"
@@ -570,7 +574,7 @@ class PoolService:
         try:
             result = await self._executor.execute_system("zpool", "status", "-v", pool_name)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(PoolException(
                     f"Failed to get scrub status: {result.stderr}",
                     error_code="SCRUB_STATUS_FAILED"
@@ -735,10 +739,7 @@ class PoolService:
                 try:
                     pool = Pool(
                         name=parts[0],
-                        state='ONLINE',  # Default, will be updated by status check
-                        health='UNKNOWN',
-                        capacity_percent=int(parts[7].rstrip('%')) if parts[7] != '-' else 0,
-                        fragmentation_percent=int(parts[6].rstrip('%')) if parts[6] != '-' else 0,
+                        state=PoolState.ONLINE,  # Default, will be updated by status check
                         size=SizeValue.from_zfs_string(parts[1]),
                         allocated=SizeValue.from_zfs_string(parts[2]),
                         free=SizeValue.from_zfs_string(parts[3])

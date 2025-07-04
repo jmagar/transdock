@@ -2,7 +2,7 @@ import pytest
 import asyncio
 from unittest.mock import Mock, AsyncMock, patch
 from datetime import datetime, timedelta
-from typing import Dict, Any, List
+
 
 from backend.zfs_operations.services.snapshot_service import SnapshotService
 from backend.zfs_operations.core.entities.snapshot import Snapshot
@@ -10,11 +10,12 @@ from backend.zfs_operations.core.value_objects.size_value import SizeValue
 from backend.zfs_operations.core.exceptions.zfs_exceptions import (
     SnapshotException,
     SnapshotNotFoundError,
-    SnapshotExistsError
+    SnapshotAlreadyExistsError
 )
 from backend.zfs_operations.core.exceptions.validation_exceptions import ValidationException
 from backend.zfs_operations.core.result import Result
 from backend.zfs_operations.core.interfaces.command_executor import CommandResult
+from backend.zfs_operations.core.value_objects.dataset_name import DatasetName
 
 
 class TestSnapshotService:
@@ -60,10 +61,11 @@ class TestSnapshotService:
     def sample_snapshot(self):
         """Create sample snapshot for testing."""
         return Snapshot(
-            name="pool1/dataset1@snap1",
-            dataset="pool1/dataset1",
+            name="snap1",
+            dataset=DatasetName("pool1/dataset1"),
             creation_time=datetime.now(),
-            size=SizeValue(1000000),
+            used=SizeValue(1000000),
+            referenced=SizeValue(1500000),
             properties={
                 "type": "snapshot",
                 "creation": "1640995200"
@@ -137,7 +139,7 @@ class TestSnapshotService:
         result = await snapshot_service.create_snapshot("pool1/dataset1@existing", recursive=False)
         
         assert result.is_failure
-        assert isinstance(result.error, SnapshotExistsError)
+        assert isinstance(result.error, SnapshotAlreadyExistsError)
     
     @pytest.mark.asyncio
     async def test_create_snapshot_command_failure(self, snapshot_service, mock_executor):

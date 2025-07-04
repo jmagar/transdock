@@ -9,15 +9,17 @@ This module provides comprehensive JWT-based authentication including:
 """
 
 import secrets
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, Any, List, Set
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from pydantic import BaseModel, Field
-from fastapi import HTTPException, status
+from fastapi import HTTPException
 from ..security_utils import SecurityUtils
 import hashlib
 import logging
+import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,122 @@ REFRESH_TOKEN_EXPIRE_DAYS = 7
 # Password context for hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+class TokenBlacklist:
+    """
+    Token blacklist manager for JWT invalidation.
+    
+    This class manages a blacklist of invalidated tokens to ensure proper logout
+    functionality. Tokens are stored with their expiration times for automatic cleanup.
+    """
+    
+    def __init__(self):
+        self._blacklisted_tokens: Dict[str, float] = {}  # token -> expiration_timestamp
+        self._lock = threading.RLock()
+        self._cleanup_interval = 3600  # Cleanup every hour
+        self._last_cleanup = time.time()
+    
+    def blacklist_token(self, token: str, expiration: Optional[datetime] = None) -> None:
+        """
+        Add a token to the blacklist.
+        
+        Args:
+            token: JWT token to blacklist
+            expiration: Token expiration time (extracted from token if not provided)
+        """
+        try:
+            if expiration is None:
+                # Extract expiration from token
+                payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
+                exp = payload.get("exp")
+                if exp:
+                    expiration = datetime.fromtimestamp(exp)
+            
+            with self._lock:
+                if expiration:
+                    self._blacklisted_tokens[token] = expiration.timestamp()
+                else:
+                    # If no expiration, blacklist for a reasonable time (24 hours)
+                    exp_time = datetime.now() + timedelta(hours=24)
+                    self._blacklisted_tokens[token] = exp_time.timestamp()
+                
+                logger.info(f"Token blacklisted successfully")
+                
+                # Perform cleanup if needed
+                self._cleanup_if_needed()
+                
+        except Exception as e:
+            logger.error(f"Failed to blacklist token: {e}")
+            # Still add to blacklist with default expiration for security
+            with self._lock:
+                exp_time = datetime.now() + timedelta(hours=24)
+                self._blacklisted_tokens[token] = exp_time.timestamp()
+    
+    def is_blacklisted(self, token: str) -> bool:
+        """
+        Check if a token is blacklisted.
+        
+        Args:
+            token: JWT token to check
+            
+        Returns:
+            bool: True if token is blacklisted, False otherwise
+        """
+        try:
+            with self._lock:
+                if token in self._blacklisted_tokens:
+                    # Check if token has expired from blacklist
+                    exp_timestamp = self._blacklisted_tokens[token]
+                    if time.time() > exp_timestamp:
+                        # Token expired from blacklist, remove it
+                        del self._blacklisted_tokens[token]
+                        return False
+                    return True
+                return False
+        except Exception as e:
+            logger.error(f"Error checking blacklist status: {e}")
+            return False
+    
+    def _cleanup_if_needed(self) -> None:
+        """Cleanup expired tokens from blacklist if needed."""
+        current_time = time.time()
+        if current_time - self._last_cleanup > self._cleanup_interval:
+            self._cleanup_expired_tokens()
+            self._last_cleanup = current_time
+    
+    def _cleanup_expired_tokens(self) -> None:
+        """Remove expired tokens from blacklist."""
+        try:
+            current_time = time.time()
+            expired_tokens = [
+                token for token, exp_time in self._blacklisted_tokens.items()
+                if current_time > exp_time
+            ]
+            
+            for token in expired_tokens:
+                del self._blacklisted_tokens[token]
+            
+            if expired_tokens:
+                logger.info(f"Cleaned up {len(expired_tokens)} expired tokens from blacklist")
+                
+        except Exception as e:
+            logger.error(f"Error during blacklist cleanup: {e}")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get blacklist statistics."""
+        with self._lock:
+            current_time = time.time()
+            active_tokens = sum(1 for exp_time in self._blacklisted_tokens.values() if current_time <= exp_time)
+            
+            return {
+                "total_blacklisted": len(self._blacklisted_tokens),
+                "active_blacklisted": active_tokens,
+                "last_cleanup": datetime.fromtimestamp(self._last_cleanup).isoformat(),
+                "next_cleanup": datetime.fromtimestamp(self._last_cleanup + self._cleanup_interval).isoformat()
+            }
+
+# Global token blacklist instance
+token_blacklist = TokenBlacklist()
+
 # Mock user database (in production, this would be a real database)
 USERS_DB = {
     "admin": {
@@ -39,7 +157,7 @@ USERS_DB = {
         "full_name": "System Administrator",
         "roles": ["admin", "user"],
         "is_active": True,
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.now(),
         "last_login": None
     },
     "user": {
@@ -49,7 +167,7 @@ USERS_DB = {
         "full_name": "Standard User",
         "roles": ["user"],
         "is_active": True,
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.now(),
         "last_login": None
     }
 }
@@ -117,9 +235,9 @@ class JWTManager:
         """Create JWT access token"""
         to_encode = data.copy()
         if expires_delta:
-            expire = datetime.utcnow() + expires_delta
+            expire = datetime.now(timezone.utc) + expires_delta
         else:
-            expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+            expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         
         to_encode.update({"exp": expire, "type": "access"})
         
@@ -129,16 +247,16 @@ class JWTManager:
             return encoded_jwt
         except Exception as e:
             logger.error(f"Failed to create access token: {e}")
-            raise HTTPException(status_code=500, detail="Failed to create access token")
+            raise HTTPException(status_code=500, detail="Failed to create access token") from e
     
     @staticmethod
     def create_refresh_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
         """Create JWT refresh token"""
         to_encode = data.copy()
         if expires_delta:
-            expire = datetime.utcnow() + expires_delta
+            expire = datetime.now(timezone.utc) + expires_delta
         else:
-            expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+            expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
         
         to_encode.update({"exp": expire, "type": "refresh"})
         
@@ -148,12 +266,17 @@ class JWTManager:
             return encoded_jwt
         except Exception as e:
             logger.error(f"Failed to create refresh token: {e}")
-            raise AuthenticationError("Failed to create refresh token")
+            raise AuthenticationError("Failed to create refresh token") from e
     
     @staticmethod
     def verify_token(token: str) -> Dict[str, Any]:
         """Verify and decode JWT token"""
         try:
+            # Check if token is blacklisted first
+            if token_blacklist.is_blacklisted(token):
+                logger.warning("Attempted to use blacklisted token")
+                raise HTTPException(status_code=401, detail="Token has been invalidated")
+            
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
             
             # Check expiration
@@ -161,13 +284,13 @@ class JWTManager:
             if exp is None:
                 raise HTTPException(status_code=401, detail="Token missing expiration")
             
-            if datetime.utcnow() > datetime.fromtimestamp(exp):
+            if datetime.now(timezone.utc).timestamp() > exp:
                 raise HTTPException(status_code=401, detail="Token has expired")
             
             return payload
         except JWTError as e:
             logger.error(f"JWT verification failed: {e}")
-            raise HTTPException(status_code=401, detail="Invalid token")
+            raise HTTPException(status_code=401, detail="Invalid token") from e
 
 class PasswordManager:
     """Password hashing and verification utilities"""
@@ -188,7 +311,7 @@ class PasswordManager:
             return pwd_context.hash(password)
         except Exception as e:
             logger.error(f"Password hashing failed: {e}")
-            raise AuthenticationError("Failed to hash password")
+            raise AuthenticationError("Failed to hash password") from e
     
     @staticmethod
     def validate_password_strength(password: str) -> bool:
@@ -202,6 +325,34 @@ class PasswordManager:
         if not any(c.isdigit() for c in password):
             return False
         return True
+    
+    @staticmethod
+    def get_password_validation_errors(password: str) -> List[str]:
+        """
+        Get specific password validation errors.
+        
+        Args:
+            password: Password to validate
+            
+        Returns:
+            List[str]: List of specific validation error messages.
+                      Empty list if password meets all requirements.
+        """
+        errors = []
+        
+        if len(password) < 8:
+            errors.append("Password must be at least 8 characters long")
+        
+        if not any(c.isupper() for c in password):
+            errors.append("Password must contain at least one uppercase letter (A-Z)")
+        
+        if not any(c.islower() for c in password):
+            errors.append("Password must contain at least one lowercase letter (a-z)")
+        
+        if not any(c.isdigit() for c in password):
+            errors.append("Password must contain at least one digit (0-9)")
+        
+        return errors
 
 class UserManager:
     """User management utilities"""
@@ -239,7 +390,7 @@ class UserManager:
                 return None
             
             # Update last login
-            USERS_DB[username]["last_login"] = datetime.utcnow()
+            USERS_DB[username]["last_login"] = datetime.now()
             
             logger.info(f"User {username} authenticated successfully")
             return user
@@ -258,9 +409,11 @@ class UserManager:
             if username in USERS_DB:
                 raise AuthenticationError(f"User {username} already exists")
             
-            # Validate password strength
-            if not PasswordManager.validate_password_strength(user_data.password):
-                raise AuthenticationError("Password does not meet strength requirements")
+            # Validate password strength with detailed error messages
+            password_errors = PasswordManager.get_password_validation_errors(user_data.password)
+            if password_errors:
+                error_message = "Password validation failed. Please ensure your password meets the following requirements: " + "; ".join(password_errors)
+                raise AuthenticationError(error_message)
             
             # Hash password
             hashed_password = PasswordManager.get_password_hash(user_data.password)
@@ -272,7 +425,7 @@ class UserManager:
                 full_name=user_data.full_name,
                 roles=user_data.roles,
                 is_active=True,
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(),
                 hashed_password=hashed_password
             )
             
@@ -283,7 +436,7 @@ class UserManager:
             return user
         except Exception as e:
             logger.error(f"Failed to create user {user_data.username}: {e}")
-            raise AuthenticationError(f"Failed to create user: {e}")
+            raise AuthenticationError(f"Failed to create user: {e}") from e
     
     @staticmethod
     def update_user(username: str, updates: Dict[str, Any]) -> Optional[UserInDB]:
@@ -418,7 +571,7 @@ def create_tokens_for_user(user: UserInDB) -> Token:
         )
     except Exception as e:
         logger.error(f"Failed to create tokens for user {user.username}: {e}")
-        raise AuthenticationError(f"Failed to create tokens: {e}")
+        raise AuthenticationError(f"Failed to create tokens: {e}") from e
 
 def validate_token_and_get_user(token: str) -> UserInDB:
     """Validate token and return user"""
@@ -439,7 +592,34 @@ def validate_token_and_get_user(token: str) -> UserInDB:
         return user
     except Exception as e:
         logger.error(f"Token validation failed: {e}")
-        raise AuthenticationError(f"Token validation failed: {e}")
+        raise AuthenticationError(f"Token validation failed: {e}") from e
+
+def invalidate_token(token: str) -> bool:
+    """
+    Invalidate a token by adding it to the blacklist.
+    
+    Args:
+        token: JWT token to invalidate
+        
+    Returns:
+        bool: True if token was successfully invalidated, False otherwise
+    """
+    try:
+        token_blacklist.blacklist_token(token)
+        logger.info("Token invalidated successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to invalidate token: {e}")
+        return False
+
+def get_blacklist_stats() -> Dict[str, Any]:
+    """
+    Get token blacklist statistics.
+    
+    Returns:
+        Dict containing blacklist statistics
+    """
+    return token_blacklist.get_stats()
 
 # Initialize default admin user if not exists
 def initialize_default_users():

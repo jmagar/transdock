@@ -4,6 +4,7 @@ Structured logger implementation for ZFS operations.
 import json
 import logging
 import sys
+import threading
 from typing import Dict, Any, Optional
 from datetime import datetime
 from ...core.interfaces.logger_interface import ILogger
@@ -126,22 +127,27 @@ class ContextLogger(StructuredLogger):
     def __init__(self, name: str = "zfs_operations", level: str = "INFO", context: Optional[Dict[str, Any]] = None):
         super().__init__(name, level)
         self.context = context or {}
+        self._context_lock = threading.Lock()
     
     def add_context(self, key: str, value: Any) -> None:
         """Add persistent context to all future log messages."""
-        self.context[key] = value
+        with self._context_lock:
+            self.context[key] = value
     
     def remove_context(self, key: str) -> None:
         """Remove context key."""
-        self.context.pop(key, None)
+        with self._context_lock:
+            self.context.pop(key, None)
     
     def clear_context(self) -> None:
         """Clear all context."""
-        self.context.clear()
+        with self._context_lock:
+            self.context.clear()
     
     def _log(self, level: int, message: str, extra: Optional[Dict[str, Any]] = None, exc_info: bool = False) -> None:
         """Internal logging method with merged context."""
-        merged_extra = self.context.copy()
+        with self._context_lock:
+            merged_extra = self.context.copy()
         if extra:
             merged_extra.update(extra)
         

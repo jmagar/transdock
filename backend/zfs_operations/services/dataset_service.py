@@ -1,6 +1,5 @@
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-import logging
 
 from ..core.interfaces.command_executor import ICommandExecutor
 from ..core.interfaces.security_validator import ISecurityValidator  
@@ -143,7 +142,7 @@ class DatasetService:
                 validated_props = self._validator.validate_zfs_properties(properties)
                 if not validated_props:
                     return Result.failure(DatasetException(
-                        f"Invalid properties specified",
+                        "Invalid properties specified",
                         error_code="INVALID_PROPERTIES"
                     ))
                 
@@ -212,7 +211,7 @@ class DatasetService:
             # Execute destroy command
             result = await self._executor.execute_zfs(*command_args)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(DatasetException(
                     f"Failed to destroy dataset: {result.stderr}",
                     error_code="DATASET_DESTROY_FAILED"
@@ -254,7 +253,7 @@ class DatasetService:
                 "set", f"{property_name}={value}", str(name)
             )
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(DatasetException(
                     f"Failed to set property: {result.stderr}",
                     error_code="DATASET_PROPERTY_SET_FAILED"
@@ -287,7 +286,7 @@ class DatasetService:
                 str(name)
             )
             
-            if not result.is_success:
+            if not result.success:
                 if "dataset does not exist" in result.stderr.lower():
                     return Result.failure(DatasetNotFoundError(str(name)))
                 return Result.failure(DatasetException(
@@ -323,7 +322,7 @@ class DatasetService:
             # Execute mount command
             result = await self._executor.execute_zfs("mount", str(name))
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(DatasetException(
                     f"Failed to mount dataset: {result.stderr}",
                     error_code="DATASET_MOUNT_FAILED"
@@ -358,7 +357,7 @@ class DatasetService:
             # Execute unmount command
             result = await self._executor.execute_zfs(*command_args)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(DatasetException(
                     f"Failed to unmount dataset: {result.stderr}",
                     error_code="DATASET_UNMOUNT_FAILED"
@@ -394,7 +393,7 @@ class DatasetService:
         """Check if a dataset exists."""
         try:
             result = await self._executor.execute_zfs("list", "-H", "-o", "name", str(name))
-            return Result.success(result.is_success)
+            return Result.success(result.success)
         except Exception as e:
             return Result.failure(DatasetException(
                 f"Failed to check dataset existence: {str(e)}",
@@ -406,7 +405,7 @@ class DatasetService:
         try:
             result = await self._executor.execute_zfs("get", "-H", "-o", "property,value", "all", str(name))
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(DatasetException(
                     f"Failed to get properties: {result.stderr}",
                     error_code="DATASET_PROPERTIES_FAILED"

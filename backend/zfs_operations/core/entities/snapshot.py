@@ -2,8 +2,9 @@
 Snapshot domain entity with business logic and relationships.
 """
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
-from datetime import datetime
+from typing import List, Optional, Dict, Any, Tuple
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
 from ..value_objects.dataset_name import DatasetName
 from ..value_objects.size_value import SizeValue
 
@@ -72,8 +73,14 @@ class Snapshot:
     
     def get_age_days(self) -> int:
         """Get the age of the snapshot in days."""
-        now = datetime.utcnow()
-        delta = now - self.creation_time
+        now = datetime.now(timezone.utc)
+        # Ensure creation_time is timezone-aware for proper comparison
+        if self.creation_time.tzinfo is None:
+            # Assume naive datetime is UTC
+            creation_time_utc = self.creation_time.replace(tzinfo=timezone.utc)
+        else:
+            creation_time_utc = self.creation_time
+        delta = now - creation_time_utc
         return delta.days
     
     def is_old(self, days: int = 30) -> bool:
@@ -134,9 +141,8 @@ class Snapshot:
     
     def get_written_since_creation(self) -> SizeValue:
         """Get the amount of data written since snapshot creation."""
-        # This would be calculated based on the difference between
-        # the parent dataset's used space and the snapshot's referenced space
-        return SizeValue(max(0, self.referenced.bytes - self.used.bytes))
+        # Return the snapshot's used bytes directly as the amount of data unique to the snapshot
+        return SizeValue(max(0, self.used.bytes))
     
     def get_unique_data(self) -> SizeValue:
         """Get the amount of unique data in this snapshot."""
@@ -218,16 +224,77 @@ class SnapshotPolicy:
     
     def _is_weekly_keeper(self, snapshot: Snapshot, all_snapshots: List[Snapshot]) -> bool:
         """Check if snapshot should be kept as weekly backup."""
-        # Implementation would check if this is the oldest snapshot in its week
-        return snapshot.creation_time.weekday() == 0  # Keep Monday snapshots
+        # Group snapshots by week (year, week_number)
+        weekly_groups: Dict[Tuple[int, int], List[Snapshot]] = defaultdict(list)
+        
+        for snap in all_snapshots:
+            # Ensure timezone-aware comparison
+            creation_time = snap.creation_time
+            if creation_time.tzinfo is None:
+                creation_time = creation_time.replace(tzinfo=timezone.utc)
+            
+            # Get year and week number (ISO week)
+            year, week, _ = creation_time.isocalendar()
+            weekly_groups[(year, week)].append(snap)
+        
+        # Get the week group for the current snapshot
+        snap_creation_time = snapshot.creation_time
+        if snap_creation_time.tzinfo is None:
+            snap_creation_time = snap_creation_time.replace(tzinfo=timezone.utc)
+        
+        year, week, _ = snap_creation_time.isocalendar()
+        week_group = weekly_groups[(year, week)]
+        
+        # Return True if this snapshot is the oldest in its week
+        oldest_in_week = min(week_group, key=lambda s: s.creation_time)
+        return snapshot == oldest_in_week
     
     def _is_monthly_keeper(self, snapshot: Snapshot, all_snapshots: List[Snapshot]) -> bool:
         """Check if snapshot should be kept as monthly backup."""
-        # Implementation would check if this is the oldest snapshot in its month
-        return snapshot.creation_time.day == 1  # Keep first day of month
+        # Group snapshots by month (year, month)
+        monthly_groups: Dict[Tuple[int, int], List[Snapshot]] = defaultdict(list)
+        
+        for snap in all_snapshots:
+            # Ensure timezone-aware comparison
+            creation_time = snap.creation_time
+            if creation_time.tzinfo is None:
+                creation_time = creation_time.replace(tzinfo=timezone.utc)
+            
+            # Group by year and month
+            monthly_groups[(creation_time.year, creation_time.month)].append(snap)
+        
+        # Get the month group for the current snapshot
+        snap_creation_time = snapshot.creation_time
+        if snap_creation_time.tzinfo is None:
+            snap_creation_time = snap_creation_time.replace(tzinfo=timezone.utc)
+        
+        month_group = monthly_groups[(snap_creation_time.year, snap_creation_time.month)]
+        
+        # Return True if this snapshot is the oldest in its month
+        oldest_in_month = min(month_group, key=lambda s: s.creation_time)
+        return snapshot == oldest_in_month
     
     def _is_yearly_keeper(self, snapshot: Snapshot, all_snapshots: List[Snapshot]) -> bool:
         """Check if snapshot should be kept as yearly backup."""
-        # Implementation would check if this is the oldest snapshot in its year
-        return (snapshot.creation_time.month == 1 and 
-                snapshot.creation_time.day == 1)  # Keep January 1st snapshots 
+        # Group snapshots by year
+        yearly_groups: Dict[int, List[Snapshot]] = defaultdict(list)
+        
+        for snap in all_snapshots:
+            # Ensure timezone-aware comparison
+            creation_time = snap.creation_time
+            if creation_time.tzinfo is None:
+                creation_time = creation_time.replace(tzinfo=timezone.utc)
+            
+            # Group by year
+            yearly_groups[creation_time.year].append(snap)
+        
+        # Get the year group for the current snapshot
+        snap_creation_time = snapshot.creation_time
+        if snap_creation_time.tzinfo is None:
+            snap_creation_time = snap_creation_time.replace(tzinfo=timezone.utc)
+        
+        year_group = yearly_groups[snap_creation_time.year]
+        
+        # Return True if this snapshot is the oldest in its year
+        oldest_in_year = min(year_group, key=lambda s: s.creation_time)
+        return snapshot == oldest_in_year 

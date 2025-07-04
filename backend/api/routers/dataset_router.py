@@ -1,7 +1,7 @@
 """
 Dataset API router using the new service layer.
 """
-from typing import Dict, Any, List, Optional
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import JSONResponse
 

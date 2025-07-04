@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List, Union
+from typing import Optional, Dict, Any, Union
 from datetime import datetime
 from ..value_objects.dataset_name import DatasetName
 from ..value_objects.size_value import SizeValue
@@ -61,8 +61,7 @@ class Dataset:
         quota_str = self.properties.get('quota', 'none')
         if quota_str and quota_str != 'none':
             try:
-                # This will be available once SizeValue is imported
-                return None  # SizeValue.from_zfs_string(quota_str)
+                return SizeValue.from_zfs_string(quota_str)
             except ValueError:
                 return None
         return None
@@ -72,8 +71,7 @@ class Dataset:
         reservation_str = self.properties.get('reservation', 'none')
         if reservation_str and reservation_str != 'none':
             try:
-                # This will be available once SizeValue is imported
-                return None  # SizeValue.from_zfs_string(reservation_str)
+                return SizeValue.from_zfs_string(reservation_str)
             except ValueError:
                 return None
         return None
@@ -83,8 +81,7 @@ class Dataset:
         refquota_str = self.properties.get('refquota', 'none')
         if refquota_str and refquota_str != 'none':
             try:
-                # This will be available once SizeValue is imported
-                return None  # SizeValue.from_zfs_string(refquota_str)
+                return SizeValue.from_zfs_string(refquota_str)
             except ValueError:
                 return None
         return None
@@ -94,8 +91,7 @@ class Dataset:
         refreservation_str = self.properties.get('refreservation', 'none')
         if refreservation_str and refreservation_str != 'none':
             try:
-                # This will be available once SizeValue is imported
-                return None  # SizeValue.from_zfs_string(refreservation_str)
+                return SizeValue.from_zfs_string(refreservation_str)
             except ValueError:
                 return None
         return None
@@ -128,8 +124,7 @@ class Dataset:
         recordsize_str = self.properties.get('recordsize')
         if recordsize_str:
             try:
-                # This will be available once SizeValue is imported
-                return None  # SizeValue.from_zfs_string(recordsize_str)
+                return SizeValue.from_zfs_string(recordsize_str)
             except ValueError:
                 return None
         return None
@@ -139,8 +134,7 @@ class Dataset:
         volsize_str = self.properties.get('volsize')
         if volsize_str:
             try:
-                # This will be available once SizeValue is imported
-                return None  # SizeValue.from_zfs_string(volsize_str)
+                return SizeValue.from_zfs_string(volsize_str)
             except ValueError:
                 return None
         return None

@@ -11,9 +11,7 @@ This module provides rate limiting functionality including:
 
 import time
 import asyncio
-from typing import Dict, Optional, Callable, Any, Tuple
-from datetime import datetime, timedelta
-from collections import defaultdict
+from typing import Dict, Callable, Any, Tuple
 from functools import wraps
 from fastapi import Request, Response, HTTPException, status
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -101,15 +99,21 @@ class RateLimitConfig:
 class RateLimiter:
     """Rate limiter implementation"""
     
-    def __init__(self, config: RateLimitConfig):
+    def __init__(self, config: RateLimitConfig, cleanup_interval: float = 300.0, bucket_timeout: float = 600.0):
         """
         Initialize rate limiter.
         
         Args:
             config: Rate limit configuration
+            cleanup_interval: Seconds between cleanup runs (default: 300 = 5 minutes)
+            bucket_timeout: Seconds of inactivity before bucket removal (default: 600 = 10 minutes)
         """
         self.config = config
         self.buckets: Dict[str, TokenBucket] = {}
+        self.cleanup_interval = cleanup_interval
+        self.bucket_timeout = bucket_timeout
+        self.last_cleanup = time.time()
+        self._buckets_lock = asyncio.Lock()
     
     async def is_allowed(self, identifier: str) -> Tuple[bool, Dict[str, Any]]:
         """
@@ -121,11 +125,20 @@ class RateLimiter:
         Returns:
             Tuple[bool, Dict[str, Any]]: (allowed, rate_limit_info)
         """
-        if identifier not in self.buckets:
-            capacity, refill_rate = self.config.get_bucket_config()
-            self.buckets[identifier] = TokenBucket(capacity, refill_rate)
+        # Check if cleanup is needed
+        current_time = time.time()
+        if current_time - self.last_cleanup >= self.cleanup_interval:
+            await self._cleanup_inactive_buckets()
         
-        bucket = self.buckets[identifier]
+        # Thread-safe access to buckets dictionary
+        async with self._buckets_lock:
+            if identifier not in self.buckets:
+                capacity, refill_rate = self.config.get_bucket_config()
+                self.buckets[identifier] = TokenBucket(capacity, refill_rate)
+            
+            bucket = self.buckets[identifier]
+        
+        # Keep bucket.consume outside the lock since TokenBucket manages its own locking
         allowed = await bucket.consume()
         
         rate_info = {
@@ -134,6 +147,35 @@ class RateLimiter:
         }
         
         return allowed, rate_info
+    
+    async def _cleanup_inactive_buckets(self) -> None:
+        """
+        Remove inactive buckets to prevent memory leaks.
+        
+        This method removes buckets that haven't been used for bucket_timeout duration
+        based on their last_refill timestamp.
+        """
+        current_time = time.time()
+        inactive_identifiers = []
+        
+        # Thread-safe access to buckets dictionary
+        async with self._buckets_lock:
+            # Find inactive buckets
+            for identifier, bucket in self.buckets.items():
+                time_since_last_use = current_time - bucket.last_refill
+                if time_since_last_use >= self.bucket_timeout:
+                    inactive_identifiers.append(identifier)
+            
+            # Remove inactive buckets
+            for identifier in inactive_identifiers:
+                del self.buckets[identifier]
+                logger.debug(f"Removed inactive rate limit bucket for identifier: {identifier}")
+        
+        # Update last cleanup time
+        self.last_cleanup = current_time
+        
+        if inactive_identifiers:
+            logger.info(f"Cleaned up {len(inactive_identifiers)} inactive rate limit buckets")
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Rate limiting middleware"""
@@ -184,10 +226,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         
         return response
 
-# Default rate limiter
-default_config = RateLimitConfig(requests_per_minute=60, burst_size=10)
-default_rate_limiter = RateLimiter(default_config)
-
 # Predefined rate limit configurations
 RATE_LIMIT_CONFIGS = {
     'default': RateLimitConfig(
@@ -207,6 +245,20 @@ RATE_LIMIT_CONFIGS = {
         burst_size=20
     )
 }
+
+# Pre-initialized rate limiters (one per config to maintain state across requests)
+RATE_LIMITERS: Dict[str, RateLimiter] = {}
+
+def _initialize_rate_limiters():
+    """Initialize rate limiters for all configurations."""
+    for config_name, config in RATE_LIMIT_CONFIGS.items():
+        RATE_LIMITERS[config_name] = RateLimiter(config)
+
+# Initialize rate limiters at module load time
+_initialize_rate_limiters()
+
+# Default rate limiter (for backward compatibility)
+default_rate_limiter = RATE_LIMITERS['default']
 
 def rate_limit(config_name: str = 'default'):
     """
@@ -232,9 +284,8 @@ def rate_limit(config_name: str = 'default'):
                 # No request found, skip rate limiting
                 return await func(*args, **kwargs)
             
-            # Get rate limiter config
-            config = RATE_LIMIT_CONFIGS.get(config_name, RATE_LIMIT_CONFIGS['default'])
-            rate_limiter = RateLimiter(config)
+            # Get pre-created rate limiter (maintains state across requests)
+            rate_limiter = RATE_LIMITERS.get(config_name, RATE_LIMITERS['default'])
             
             # Check rate limit
             identifier = f"ip:{request.client.host if request.client else 'unknown'}"
@@ -262,8 +313,8 @@ def create_rate_limit_middleware(config_name: str = 'default'):
     Returns:
         Configured middleware class
     """
-    config = RATE_LIMIT_CONFIGS.get(config_name, RATE_LIMIT_CONFIGS['default'])
-    rate_limiter = RateLimiter(config)
+    # Get pre-created rate limiter (maintains state across requests)
+    rate_limiter = RATE_LIMITERS.get(config_name, RATE_LIMITERS['default'])
     
     class ConfiguredRateLimitMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next: Callable) -> Response:

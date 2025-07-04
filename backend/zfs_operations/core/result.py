@@ -1,4 +1,4 @@
-from typing import Generic, TypeVar, Union, Optional, Callable, Any, cast
+from typing import Generic, TypeVar, Optional, Callable, Any, List, cast
 from dataclasses import dataclass
 
 T = TypeVar('T')
@@ -106,7 +106,7 @@ class Result(Generic[T, E]):
             }
         else:
             error = cast(E, self._error)
-            error_dict = error.to_dict() if hasattr(error, 'to_dict') else str(error)
+            error_dict = getattr(error, 'to_dict', lambda: str(error))()
             return {
                 'success': False,
                 'value': None,
@@ -140,7 +140,7 @@ def failure(error: E) -> Result[Any, E]:
 
 
 # Utility functions for working with multiple results
-def collect_results(results: list[Result[T, E]]) -> Result[list[T], E]:
+def collect_results(results: List[Result[T, E]]) -> Result[List[T], E]:
     """Collect multiple results into a single result containing a list"""
     values = []
     for result in results:
@@ -150,7 +150,7 @@ def collect_results(results: list[Result[T, E]]) -> Result[list[T], E]:
     return Result.success(values)
 
 
-def first_success(results: list[Result[T, E]]) -> Optional[Result[T, E]]:
+def first_success(results: List[Result[T, E]]) -> Optional[Result[T, E]]:
     """Return the first successful result, or None if all failed"""
     for result in results:
         if result.is_success:
@@ -158,7 +158,7 @@ def first_success(results: list[Result[T, E]]) -> Optional[Result[T, E]]:
     return None
 
 
-def first_failure(results: list[Result[T, E]]) -> Optional[Result[T, E]]:
+def first_failure(results: List[Result[T, E]]) -> Optional[Result[T, E]]:
     """Return the first failed result, or None if all succeeded"""
     for result in results:
         if result.is_failure:

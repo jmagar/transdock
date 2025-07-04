@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional, Dict, TYPE_CHECKING
+from typing import List, Dict, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..value_objects.ssh_config import SSHConfig

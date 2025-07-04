@@ -3,10 +3,9 @@ Concrete implementation of command executor interface.
 """
 import asyncio
 import logging
-from typing import List, Optional
+from typing import List
 from ..core.interfaces.command_executor import ICommandExecutor, CommandResult
 from ..core.value_objects.ssh_config import SSHConfig
-from ..core.exceptions.zfs_exceptions import ZFSException
 
 
 class CommandExecutor(ICommandExecutor):
