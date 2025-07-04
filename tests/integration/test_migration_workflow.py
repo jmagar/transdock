@@ -6,14 +6,13 @@ This module contains comprehensive tests for the complete migration workflow.
 
 import pytest
 import asyncio
-from unittest.mock import AsyncMock, patch, Mock
+from unittest.mock import AsyncMock, patch
 from backend.migration_service import MigrationService
-from backend.models import MigrationRequest
+from backend.security_utils import SecurityValidationError
 from tests.fixtures.test_data import (
     MIGRATION_REQUEST_AUTHELIA,
     MIGRATION_REQUEST_SIMPLE,
     DOCKER_COMPOSE_AUTHELIA,
-    MOCK_COMMAND_OUTPUTS
 )
 
 
@@ -315,7 +314,7 @@ class TestMigrationWorkflow:
         
         async def mock_transfer_with_progress(*args, **kwargs):
             # Simulate transfer progress
-            for progress in [25, 50, 75, 100]:
+            for _progress in [25, 50, 75, 100]:
                 # This would normally be handled by the transfer operation
                 await asyncio.sleep(0.1)
             return True
@@ -358,7 +357,7 @@ class TestMigrationWorkflow:
         }
         
         # This should fail during validation
-        with pytest.raises(Exception):  # Security validation should raise exception
+        with pytest.raises(SecurityValidationError):  # Security validation should raise exception
             await migration_service.start_migration(malicious_request)
 
     @pytest.mark.asyncio

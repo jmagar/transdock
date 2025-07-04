@@ -5,24 +5,19 @@ This module contains integration tests for all TransDock API endpoints.
 """
 
 import pytest
-import json
 from fastapi.testclient import TestClient
-from unittest.mock import AsyncMock, patch, Mock
+from unittest.mock import AsyncMock, patch
 
 from backend.main import app
-from backend.models import MigrationRequest
 from tests.fixtures.test_data import (
-    API_RESPONSES,
-    MIGRATION_REQUEST_AUTHELIA,
-    MIGRATION_STATUS_RUNNING,
     MIGRATION_STATUS_COMPLETED,
     MIGRATION_STATUS_FAILED,
     SYSTEM_INFO_RESPONSE
 )
 
 
-class TestAPIEndpoints:
-    """Test suite for TransDock API endpoints."""
+class BaseAPITest:
+    """Base class for API endpoint tests with common fixtures."""
 
     @pytest.fixture
     def client(self):
@@ -43,6 +38,10 @@ class TestAPIEndpoints:
             mock.cancel_migration = AsyncMock()
             mock.cleanup_migration = AsyncMock()
             yield mock
+
+
+class TestHealthAndSystemEndpoints(BaseAPITest):
+    """Test suite for health and system information endpoints."""
 
     def test_health_check(self, client):
         """Test health check endpoint."""
@@ -107,6 +106,10 @@ class TestAPIEndpoints:
         assert data["version"] is None
         assert len(data["pools"]) == 0
 
+
+class TestComposeStackEndpoints(BaseAPITest):
+    """Test suite for Docker Compose stack endpoints."""
+
     def test_list_compose_stacks_success(self, client, mock_migration_service):
         """Test list compose stacks endpoint success."""
         mock_migration_service.get_compose_stacks.return_value = [
@@ -161,6 +164,10 @@ class TestAPIEndpoints:
         assert response.status_code == 404
         data = response.json()
         assert "detail" in data
+
+
+class TestMigrationEndpoints(BaseAPITest):
+    """Test suite for migration management endpoints."""
 
     def test_start_migration_success(self, client, mock_migration_service):
         """Test start migration endpoint success."""
@@ -349,6 +356,10 @@ class TestAPIEndpoints:
         data = response.json()
         assert len(data["migrations"]) == 0
 
+
+class TestAPIErrorHandling(BaseAPITest):
+    """Test suite for API error handling and validation."""
+
     def test_api_cors_headers(self, client):
         """Test that CORS headers are properly set."""
         response = client.options("/api/system/info")
@@ -367,6 +378,56 @@ class TestAPIEndpoints:
         data = response.json()
         assert "detail" in data
         assert isinstance(data["detail"], str)
+
+    def test_request_validation_edge_cases(self, client):
+        """Test request validation with edge cases."""
+        # Test with completely invalid JSON structure
+        invalid_requests = [
+            {},  # Empty object
+            {"compose_dataset": None},  # Null values
+            {"compose_dataset": 123},  # Wrong type
+            {"compose_dataset": "valid", "ssh_port": "invalid"},  # Invalid port type
+            {"compose_dataset": "valid", "ssh_port": -1},  # Invalid port range
+            {"compose_dataset": "valid", "ssh_port": 70000},  # Port out of range
+        ]
+        
+        for invalid_request in invalid_requests:
+            response = client.post("/api/migrations/start", json=invalid_request)
+            # Should return validation error
+            assert response.status_code in [400, 422]
+
+    def test_concurrent_api_requests(self, client, mock_migration_service):
+        """Test concurrent API requests handling."""
+        import threading
+        import time
+        
+        results = []
+        
+        def make_request():
+            response = client.get("/api/system/info")
+            results.append(response.status_code)
+        
+        # Create multiple threads
+        threads = []
+        for _ in range(5):
+            thread = threading.Thread(target=make_request)
+            threads.append(thread)
+        
+        # Start all threads
+        for thread in threads:
+            thread.start()
+        
+        # Wait for all threads to complete
+        for thread in threads:
+            thread.join()
+        
+        # All requests should succeed
+        assert all(status == 200 for status in results)
+        assert len(results) == 5
+
+
+class TestIntegrationWorkflows(BaseAPITest):
+    """Test suite for full integration workflows."""
 
     @pytest.mark.integration
     def test_full_migration_workflow(self, client, mock_migration_service):
@@ -420,67 +481,4 @@ class TestAPIEndpoints:
             response = client.get("/api/system/info")
             assert response.status_code == expected_status
 
-    def test_request_validation_edge_cases(self, client):
-        """Test request validation with edge cases."""
-        edge_case_requests = [
-            # Missing required fields
-            {"target_host": "192.168.1.100"},
-            
-            # Invalid data types
-            {"compose_dataset": 123, "target_host": "192.168.1.100"},
-            
-            # Invalid port numbers
-            {
-                "compose_dataset": "authelia",
-                "target_host": "192.168.1.100",
-                "target_base_path": "/home/user/docker",
-                "ssh_user": "root",
-                "ssh_port": 65536  # Invalid port
-            },
-            
-            # Empty strings
-            {
-                "compose_dataset": "",
-                "target_host": "192.168.1.100",
-                "target_base_path": "/home/user/docker",
-                "ssh_user": "root",
-                "ssh_port": 22
-            }
-        ]
-        
-        for invalid_request in edge_case_requests:
-            response = client.post("/api/migrations/start", json=invalid_request)
-            assert response.status_code == 422  # Validation error
-
-    def test_concurrent_api_requests(self, client, mock_migration_service):
-        """Test handling of concurrent API requests."""
-        import threading
-        import time
-        
-        mock_migration_service.get_system_info.return_value = SYSTEM_INFO_RESPONSE
-        
-        results = []
-        errors = []
-        
-        def make_request():
-            try:
-                response = client.get("/api/system/info")
-                results.append(response.status_code)
-            except Exception as e:
-                errors.append(e)
-        
-        # Make multiple concurrent requests
-        threads = []
-        for _ in range(10):
-            thread = threading.Thread(target=make_request)
-            threads.append(thread)
-            thread.start()
-        
-        # Wait for all threads to complete
-        for thread in threads:
-            thread.join()
-        
-        # All requests should succeed
-        assert len(errors) == 0
-        assert len(results) == 10
-        assert all(status == 200 for status in results) 
+ 

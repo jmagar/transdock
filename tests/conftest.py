@@ -10,13 +10,11 @@ import tempfile
 import os
 from pathlib import Path
 from unittest.mock import Mock, AsyncMock, patch
-from typing import Dict, Any, Generator
 from fastapi.testclient import TestClient
 import httpx
 
 # Import TransDock modules
-from backend.models import MigrationRequest, MigrationStatus, VolumeMount, TransferMethod
-from backend.security_utils import SecurityUtils
+from backend.models import MigrationRequest, MigrationStatus, VolumeMount
 from backend.migration_service import MigrationService
 from backend.zfs_ops import ZFSOperations
 from backend.docker_ops import DockerOperations

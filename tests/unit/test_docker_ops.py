@@ -11,10 +11,7 @@ from unittest.mock import patch, mock_open
 from backend.docker_ops import DockerOperations
 from tests.fixtures.test_data import (
     DOCKER_COMPOSE_AUTHELIA, 
-    DOCKER_COMPOSE_SIMPLE,
-    DOCKER_COMPOSE_COMPLEX,
 )
-import asyncio
 
 # New test data with absolute paths for volume tests
 DOCKER_COMPOSE_ABSOLUTE_PATHS = {

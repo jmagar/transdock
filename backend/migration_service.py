@@ -58,7 +58,7 @@ class MigrationService:
         
         return migration_id
     
-    async def get_migration_status(self, migration_id: str) -> Optional[MigrationStatus]:
+    async def get_migration_status(self, migration_id: str) -> MigrationStatus | None:
         """Get the status of a migration"""
         return self.active_migrations.get(migration_id)
     
@@ -294,10 +294,9 @@ class MigrationService:
         """Get system information relevant to migrations"""
         import platform
         import subprocess
-        from typing import Union
         
         # Basic system info - using Union type for mixed value types
-        info: Dict[str, Union[str, bool, None]] = {
+        info: Dict[str, str | bool | None] = {
             "hostname": platform.node(),
             "platform": platform.platform(),
             "architecture": platform.architecture()[0]
@@ -395,6 +394,12 @@ class MigrationService:
                 "pools": []
             }
 
+    def _is_valid_stack_name(self, name: str) -> bool:
+        """Validate stack name for security."""
+        if not name or len(name) > 64:
+            return False
+        return str(name).replace('-', '').replace('_', '').replace('.', '').isalnum()
+
     async def get_compose_stacks(self) -> List[Dict[str, str]]:
         """Get list of available Docker Compose stacks"""
         try:
@@ -408,13 +413,10 @@ class MigrationService:
                 for item in os.listdir(validated_base):
                     # Validate each stack name
                     try:
-                        # Basic validation for stack names  
-                        if not item or len(item) > 64:
-                            continue
-                        if not str(item).replace('-', '').replace('_', '').replace('.', '').isalnum():
+                        if not self._is_valid_stack_name(item):
                             continue
                             
-                        stack_path = SecurityUtils.sanitize_path(os.path.join(validated_base, item), validated_base)
+                        stack_path = SecurityUtils.sanitize_path(os.path.join(validated_base, item), validated_base, allow_absolute=True)
                         
                         if os.path.isdir(stack_path):
                             compose_file = await self.docker_ops.find_compose_file(stack_path)
@@ -440,7 +442,7 @@ class MigrationService:
             raise ValueError("Stack name contains invalid characters")
         
         compose_base = SecurityUtils.sanitize_path(self.docker_ops.compose_base_path, allow_absolute=True)
-        stack_path = SecurityUtils.sanitize_path(os.path.join(compose_base, stack_name), compose_base)
+        stack_path = SecurityUtils.sanitize_path(os.path.join(compose_base, stack_name), compose_base, allow_absolute=True)
         
         if not os.path.exists(stack_path):
             raise FileNotFoundError("Compose stack not found")

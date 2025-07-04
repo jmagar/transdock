@@ -63,9 +63,9 @@ async def create_migration(request: MigrationRequest):
             message="Migration process started successfully"
         )
     except SecurityValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}") from e
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 @app.get("/api/migrations")
 async def list_migrations():
@@ -74,7 +74,7 @@ async def list_migrations():
         migrations = await migration_service.list_migrations()
         return {"migrations": migrations}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.get("/api/migrations/{migration_id}/status")
 async def get_migration_status(migration_id: str):
@@ -93,11 +93,11 @@ async def get_migration_status(migration_id: str):
             raise HTTPException(status_code=404, detail="Migration not found")
         return status
     except SecurityValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}") from e
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.get("/health")
 async def health_check():
@@ -114,7 +114,7 @@ async def zfs_status():
     try:
         return await migration_service.get_zfs_status()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.get("/datasets")
 async def list_datasets():
@@ -141,9 +141,9 @@ async def list_datasets():
         
         return {"datasets": datasets}
     except SecurityValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}") from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.get("/api/compose/stacks")
 async def list_compose_stacks():
@@ -152,7 +152,7 @@ async def list_compose_stacks():
         stacks = await migration_service.get_compose_stacks()
         return {"stacks": stacks}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.get("/api/compose/stacks/{stack_name}")
 async def analyze_compose_stack(stack_name: str):
@@ -161,9 +161,9 @@ async def analyze_compose_stack(stack_name: str):
         stack_info = await migration_service.get_stack_info(stack_name)
         return stack_info
     except (ValueError, FileNotFoundError) as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.get("/api/system/info")
 async def system_info():
@@ -171,7 +171,7 @@ async def system_info():
     try:
         return await migration_service.get_system_info()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.post("/api/migrations/{migration_id}/cancel")
 async def cancel_migration(migration_id: str):
@@ -187,14 +187,13 @@ async def cancel_migration(migration_id: str):
         success = await migration_service.cancel_migration(migration_id)
         if success:
             return {"success": True, "message": "Migration cancelled successfully"}
-        else:
-            raise HTTPException(status_code=400, detail="Failed to cancel migration")
+        raise HTTPException(status_code=400, detail="Failed to cancel migration")
     except SecurityValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Migration not found")
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}") from e
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Migration not found") from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.post("/api/migrations/{migration_id}/cleanup")
 async def cleanup_migration(migration_id: str):
@@ -210,14 +209,13 @@ async def cleanup_migration(migration_id: str):
         success = await migration_service.cleanup_migration(migration_id)
         if success:
             return {"success": True, "message": "Migration cleaned up successfully"}
-        else:
-            raise HTTPException(status_code=400, detail="Failed to cleanup migration")
+        raise HTTPException(status_code=400, detail="Failed to cleanup migration")
     except SecurityValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Migration not found")
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}") from e
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Migration not found") from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 if __name__ == "__main__":
     import uvicorn

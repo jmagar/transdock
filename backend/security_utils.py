@@ -95,9 +95,9 @@ class SecurityUtils:
             while path != decoded_path:
                 path = decoded_path
                 decoded_path = unquote(path)
-        except Exception:
+        except Exception as e:
             # If decoding fails, it's a suspicious path
-            raise SecurityValidationError(f"Path contains invalid URL encoding: {original_path}")
+            raise SecurityValidationError(f"Path contains invalid URL encoding: {original_path}") from e
         
         # 2. Check for null bytes
         if '\\0' in path or '\x00' in path:
@@ -123,7 +123,7 @@ class SecurityUtils:
         
         # 6. Check for directory traversal patterns AFTER normalization
         if '..' in normalized_path.split(os.sep):
-             raise SecurityValidationError(f"Path contains directory traversal attempt: {original_path}")
+            raise SecurityValidationError(f"Path contains directory traversal attempt: {original_path}")
 
         # 7. If base_path is provided, ensure the path is within it
         if base_path:

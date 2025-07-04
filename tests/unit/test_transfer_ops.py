@@ -6,7 +6,7 @@ refactored TransferOperations class.
 """
 
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import AsyncMock
 from backend.transfer_ops import TransferOperations
 from backend.models import VolumeMount, TransferMethod
 

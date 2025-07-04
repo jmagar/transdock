@@ -6,7 +6,6 @@ refactored ZFSOperations class which uses a secure command runner.
 """
 
 import pytest
-from unittest.mock import patch
 from backend.zfs_ops import ZFSOperations
 
 @pytest.fixture

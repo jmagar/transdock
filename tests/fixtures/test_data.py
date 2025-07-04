@@ -4,7 +4,7 @@ Test Data Fixtures for TransDock
 This module provides sample data for testing TransDock functionality.
 """
 
-from typing import Dict, Any, List
+from backend.models import MigrationRequest
 
 # Sample Docker Compose configurations
 DOCKER_COMPOSE_AUTHELIA = {
@@ -146,8 +146,6 @@ SYSTEM_INFO_NO_ZFS = {
 }
 
 # Sample migration requests
-from backend.models import MigrationRequest
-
 MIGRATION_REQUEST_AUTHELIA = MigrationRequest(
     compose_dataset='authelia',
     target_host='192.168.1.100',

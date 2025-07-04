@@ -7,7 +7,7 @@ validation bypasses, and security boundary testing.
 
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch, Mock
+from unittest.mock import patch
 
 from backend.main import app
 from backend.security_utils import SecurityUtils, SecurityValidationError
@@ -165,7 +165,7 @@ class TestPenetrationSecurity:
             "A" * 1000,   # 1KB
             "A" * 10000,  # 10KB  
             "A" * 100000, # 100KB
-            "A" * 1000000 # 1MB (if allowed by server)
+            "A" * 1000000  # 1MB (if allowed by server)
         ]
         
         for payload in oversized_payloads:
@@ -322,10 +322,9 @@ class TestPenetrationSecurity:
             
             # After a certain number of requests, should be rate limited
             # (This depends on implementation - may return 429 Too Many Requests)
-            if i > 50:  # Allow some requests initially
+            if i > 50 and response.status_code == 429:  # Allow some requests initially
                 # If rate limiting is implemented, should see 429 responses
-                if response.status_code == 429:
-                    break
+                break
         
         # At minimum, server should remain responsive
         assert response.status_code in [200, 429, 500]
