@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 from typing import Optional
+from docker.errors import DockerException
 from .models import (
     MigrationRequest, MigrationResponse, HostValidationRequest, 
     HostCapabilities, ContainerMigrationRequest,
@@ -280,11 +281,21 @@ async def get_docker_info():
 async def validate_host(request: HostValidationRequest) -> HostCapabilities:
     """Validate host capabilities and discover available paths"""
     try:
-        # Basic host validation - placeholder implementation
+        # Validate Docker availability on target host
+        docker_ops = migration_service.docker_ops
+        docker_available = await docker_ops.validate_docker_on_target(
+            target_host=request.hostname,
+            ssh_user=request.ssh_user,
+            ssh_port=request.ssh_port
+        )
+        
+        # Check ZFS availability (basic check for now)
+        zfs_available = await zfs_service.is_zfs_available()
+        
         return HostCapabilities(
             hostname=request.hostname,
-            docker_available=True,  # Assume available for now
-            zfs_available=False,    # Will be determined by actual check
+            docker_available=docker_available,
+            zfs_available=zfs_available,
             compose_paths=[],
             appdata_paths=[],
             zfs_pools=[],
@@ -306,13 +317,39 @@ async def list_remote_containers(
 ):
     """List containers on remote host"""
     try:
-        # This would use SSH to run docker commands on remote host
-        # For now, return a placeholder implementation
+        # Use Docker API via SSH to list containers on remote host
+        docker_ops = migration_service.docker_ops
+        containers = await docker_ops.list_all_containers(
+            include_stopped=include_stopped,
+            host=hostname,
+            ssh_user=ssh_user
+        )
+        
+        # Convert ContainerInfo objects to dictionaries for API response
+        container_data = []
+        for container in containers:
+            container_data.append({
+                "id": container.id,
+                "name": container.name,
+                "image": container.image,
+                "state": container.state,
+                "status": container.status,
+                "labels": container.labels,
+                "networks": container.networks,
+                "created": container.created,
+                "project_name": container.project_name,
+                "service_name": container.service_name
+            })
+        
         return {
             "hostname": hostname,
-            "containers": [],
-            "message": "Remote container listing via SSH - implementation needed"
+            "containers": container_data,
+            "total_containers": len(containers),
+            "running_containers": len([c for c in containers if c.state == "running"])
         }
+    except DockerException as e:
+        logger.error(f"Failed to connect to Docker on {hostname}: {e}")
+        raise HTTPException(status_code=503, detail=f"Docker not available on {hostname}: {e}") from e
     except Exception as e:
         logger.error(f"Failed to list remote containers: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e

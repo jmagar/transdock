@@ -1,6 +1,7 @@
 import logging
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
+import contextlib
 import docker
 from docker.errors import DockerException, NotFound
 from .models import VolumeMount
@@ -61,15 +62,8 @@ class DockerOperations:
     def __del__(self):
         """Clean up Docker client connection"""
         if hasattr(self, 'client'):
-            try:
+            with contextlib.suppress(OSError, ConnectionError, RuntimeError, AttributeError, DockerException):
                 self.client.close()
-            except (OSError, ConnectionError, RuntimeError, AttributeError, DockerException) as e:
-                # Silently handle connection cleanup errors during destruction
-                # OSError/ConnectionError: Network/socket issues during close
-                # RuntimeError: Client in invalid state
-                # AttributeError: Client object malformed or partially initialized
-                # DockerException: Docker-specific errors during cleanup
-                pass
     
     def get_docker_client(self, host: Optional[str] = None, ssh_user: str = "root", ssh_port: int = 22) -> docker.DockerClient:
         """Get Docker client for local or remote host
