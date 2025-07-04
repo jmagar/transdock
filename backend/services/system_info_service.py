@@ -1,7 +1,7 @@
 import platform
 import subprocess
 import logging
-from typing import Dict, Any, Union
+from typing import Dict, Any, Union, List
 from ..zfs_ops import ZFSOperations
 from ..docker_ops import DockerOperations
 from ..security_utils import SecurityUtils
@@ -108,7 +108,7 @@ class SystemInfoService:
         except Exception:
             return "unknown"
     
-    async def _get_zfs_pools(self) -> list[str]:
+    async def _get_zfs_pools(self) -> List[str]:
         """Get list of ZFS pools"""
         try:
             validated_cmd = SecurityUtils.validate_zfs_command_args(

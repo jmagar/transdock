@@ -16,7 +16,7 @@ class ZFSOperations:
     def __init__(self):
         pass
 
-    async def run_command(self, cmd: List[str]) -> tuple[int, str, str]:
+    async def run_command(self, cmd: List[str]) -> Tuple[int, str, str]:
         """Execute a command and return result"""
         try:
             process = await asyncio.create_subprocess_exec(
@@ -32,7 +32,7 @@ class ZFSOperations:
         except Exception as e:
             return 1, "", str(e)
 
-    async def safe_run_zfs_command(self, *args: str) -> tuple[int, str, str]:
+    async def safe_run_zfs_command(self, *args: str) -> Tuple[int, str, str]:
         """
         Safely validate and execute a ZFS command with security validation.
 
@@ -2330,7 +2330,7 @@ class ZFSOperations:
             return {"success": False, "error": "Security validation failed"}
 
     async def safe_run_system_command(
-            self, *args: str) -> tuple[int, str, str]:
+        self, *args: str) -> Tuple[int, str, str]:
         """
         Safely validate and execute a system command with security validation.
 
