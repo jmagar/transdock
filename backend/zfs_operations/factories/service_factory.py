@@ -2,119 +2,136 @@
 Service factory for dependency injection and service creation.
 """
 from typing import Dict, Any, Optional
+import logging
+
 from ..core.interfaces.command_executor import ICommandExecutor
 from ..core.interfaces.security_validator import ISecurityValidator
 from ..core.interfaces.logger_interface import ILogger
 from ..infrastructure.command_executor import CommandExecutor
 from ..infrastructure.security_validator import SecurityValidator
 from ..infrastructure.logging.structured_logger import StructuredLogger
+from ..services.dataset_service import DatasetService
+from ..services.snapshot_service import SnapshotService
+from ..services.pool_service import PoolService
 
 
 class ServiceFactory:
-    """Factory for creating and managing service instances with dependency injection."""
+    """Factory for creating service instances with proper dependency injection."""
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
+        """Initialize the service factory with configuration."""
         self._config = config or {}
-        self._instances: Dict[str, Any] = {}
+        self._logger_instances: Dict[str, ILogger] = {}
         
-        # Initialize core infrastructure
-        self._command_executor = None
-        self._security_validator = None
-        self._logger = None
+        # Initialize shared dependencies
+        self._executor: ICommandExecutor = CommandExecutor(
+            timeout=self._config.get('command_timeout', 30)
+        )
+        self._validator: ISecurityValidator = SecurityValidator()
     
-    def get_command_executor(self) -> ICommandExecutor:
-        """Get or create command executor instance."""
-        if self._command_executor is None:
-            timeout = self._config.get('command_timeout', 30)
-            self._command_executor = CommandExecutor(timeout=timeout)
-        return self._command_executor
-    
-    def get_security_validator(self) -> ISecurityValidator:
-        """Get or create security validator instance."""
-        if self._security_validator is None:
-            self._security_validator = SecurityValidator()
-        return self._security_validator
-    
-    def get_logger(self, name: str = "zfs_operations") -> ILogger:
-        """Get or create logger instance."""
-        if self._logger is None:
-            log_level = self._config.get('log_level', 'INFO')
-            self._logger = StructuredLogger(name=name, level=log_level)
-        return self._logger
-    
-    def create_dataset_service(self):
-        """Create DatasetService with dependencies."""
-        from ..services.dataset_service import DatasetService
+    def create_dataset_service(self) -> DatasetService:
+        """Create a DatasetService instance with injected dependencies."""
+        logger = self._get_logger("dataset_service")
         return DatasetService(
-            executor=self.get_command_executor(),
-            validator=self.get_security_validator(),
-            logger=self.get_logger("dataset_service")
+            executor=self._executor,
+            validator=self._validator,
+            logger=logger
         )
     
-    def create_snapshot_service(self):
-        """Create SnapshotService with dependencies."""
-        from ..services.snapshot_service import SnapshotService
+    def create_snapshot_service(self) -> SnapshotService:
+        """Create a SnapshotService instance with injected dependencies."""
+        logger = self._get_logger("snapshot_service")
         return SnapshotService(
-            executor=self.get_command_executor(),
-            validator=self.get_security_validator(),
-            logger=self.get_logger("snapshot_service")
+            executor=self._executor,
+            validator=self._validator,
+            logger=logger
         )
     
-    def create_pool_service(self):
-        """Create PoolService with dependencies."""
-        from ..services.pool_service import PoolService
+    def create_pool_service(self) -> PoolService:
+        """Create a PoolService instance with injected dependencies."""
+        logger = self._get_logger("pool_service")
         return PoolService(
-            executor=self.get_command_executor(),
-            validator=self.get_security_validator(),
-            logger=self.get_logger("pool_service")
+            executor=self._executor,
+            validator=self._validator,
+            logger=logger
         )
     
-    def create_backup_service(self):
-        """Create BackupService with dependencies."""
-        from ..services.backup_service import BackupService
-        return BackupService(
-            executor=self.get_command_executor(),
-            validator=self.get_security_validator(),
-            logger=self.get_logger("backup_service")
-        )
+    def create_all_services(self) -> Dict[str, Any]:
+        """Create all services and return them as a dictionary."""
+        return {
+            'dataset_service': self.create_dataset_service(),
+            'snapshot_service': self.create_snapshot_service(),
+            'pool_service': self.create_pool_service()
+        }
     
-    def create_encryption_service(self):
-        """Create EncryptionService with dependencies."""
-        from ..services.encryption_service import EncryptionService
-        return EncryptionService(
-            executor=self.get_command_executor(),
-            validator=self.get_security_validator(),
-            logger=self.get_logger("encryption_service")
-        )
+    def _get_logger(self, service_name: str) -> ILogger:
+        """Get or create a logger instance for a service."""
+        if service_name not in self._logger_instances:
+            self._logger_instances[service_name] = StructuredLogger(
+                name=service_name,
+                level=self._config.get('log_level', 'INFO')
+            )
+        return self._logger_instances[service_name]
     
-    def create_remote_service(self):
-        """Create RemoteService with dependencies."""
-        from ..services.remote_service import RemoteService
-        max_connections = self._config.get('max_ssh_connections', 10)
-        return RemoteService(
-            executor=self.get_command_executor(),
-            validator=self.get_security_validator(),
-            logger=self.get_logger("remote_service"),
-            max_connections=max_connections
-        )
+    def get_config(self) -> Dict[str, Any]:
+        """Get the current configuration."""
+        return self._config.copy()
     
-    def create_quota_service(self):
-        """Create QuotaService with dependencies."""
-        from ..services.quota_service import QuotaService
-        return QuotaService(
-            executor=self.get_command_executor(),
-            validator=self.get_security_validator(),
-            logger=self.get_logger("quota_service")
+    def update_config(self, new_config: Dict[str, Any]):
+        """Update the configuration and reinitialize dependencies."""
+        self._config.update(new_config)
+        # Reinitialize dependencies with new config
+        self._executor = CommandExecutor(
+            timeout=self._config.get('command_timeout', 30)
         )
+        self._validator = SecurityValidator()
+        # Clear logger instances to force recreation with new config
+        self._logger_instances.clear()
+
+
+class ServiceFactoryBuilder:
+    """Builder for creating ServiceFactory instances with fluent configuration."""
     
-    def configure(self, **kwargs) -> 'ServiceFactory':
-        """Configure the factory with additional settings."""
-        self._config.update(kwargs)
+    def __init__(self):
+        self._config = {}
+    
+    def with_command_timeout(self, timeout: int) -> 'ServiceFactoryBuilder':
+        """Set command timeout configuration."""
+        self._config['command_timeout'] = timeout
         return self
     
-    def reset(self) -> None:
-        """Reset all cached instances."""
-        self._instances.clear()
-        self._command_executor = None
-        self._security_validator = None
-        self._logger = None 
+    def with_log_level(self, level: str) -> 'ServiceFactoryBuilder':
+        """Set logging level."""
+        self._config['log_level'] = level
+        return self
+    
+    def build(self) -> ServiceFactory:
+        """Build the ServiceFactory instance."""
+        return ServiceFactory(self._config)
+
+
+# Convenience function for creating a default service factory
+def create_default_service_factory() -> ServiceFactory:
+    """Create a service factory with default configuration."""
+    return ServiceFactoryBuilder() \
+        .with_command_timeout(30) \
+        .with_log_level('INFO') \
+        .build()
+
+
+# Convenience function for creating a development service factory
+def create_development_service_factory() -> ServiceFactory:
+    """Create a service factory configured for development."""
+    return ServiceFactoryBuilder() \
+        .with_command_timeout(10) \
+        .with_log_level('DEBUG') \
+        .build()
+
+
+# Convenience function for creating a production service factory
+def create_production_service_factory() -> ServiceFactory:
+    """Create a service factory configured for production."""
+    return ServiceFactoryBuilder() \
+        .with_command_timeout(60) \
+        .with_log_level('WARNING') \
+        .build() 

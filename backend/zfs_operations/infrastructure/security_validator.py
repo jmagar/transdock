@@ -231,4 +231,36 @@ class SecurityValidator(ISecurityValidator):
             if re.search(pattern, snapshot_part):
                 raise SecurityValidationError(f"Snapshot name contains dangerous characters: {name}")
         
-        return name 
+        return name
+    
+    def validate_path(self, path: str) -> str:
+        """Validate and sanitize file path."""
+        if not path or not isinstance(path, str):
+            raise SecurityValidationError("Path cannot be empty or non-string")
+        
+        if len(path) > 1024:
+            raise SecurityValidationError("Path too long (max 1024 characters)")
+        
+        # Check for dangerous patterns
+        for pattern in self._dangerous_patterns:
+            if re.search(pattern, path):
+                raise SecurityValidationError(f"Path contains dangerous characters: {path}")
+        
+        # Check for path traversal attempts
+        if '..' in path:
+            raise SecurityValidationError("Path contains path traversal attempts")
+        
+        # Path should start with / for absolute paths
+        if not path.startswith('/'):
+            raise SecurityValidationError("Path must be absolute (start with /)")
+        
+        return path
+    
+    def escape_shell_argument(self, arg: str) -> str:
+        """Escape shell argument to prevent injection."""
+        if not arg or not isinstance(arg, str):
+            return ""
+        
+        # Simple escaping - wrap in single quotes and escape any single quotes
+        escaped = arg.replace("'", "'\"'\"'")
+        return f"'{escaped}'"
