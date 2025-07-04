@@ -9,6 +9,7 @@ TransDock is a powerful tool for migrating Docker Compose stacks between machine
 - **Intelligent Transfer**: Automatically chooses between ZFS send/receive or rsync
 - **Volume Management**: Automatically detects and converts directories to ZFS datasets
 - **Path Translation**: Updates Docker Compose files with new paths on target machine
+- **Migration Verification**: Verifies successful container deployment and health checks
 - **RESTful API**: Fully featured FastAPI backend ready for frontend integration
 - **Progress Tracking**: Real-time migration progress and status updates
 - **Error Recovery**: Comprehensive error handling with rollback capabilities
@@ -160,7 +161,7 @@ export TRANSDOCK_ZFS_POOL="custom-pool"
 
 ## 🔄 Migration Process
 
-TransDock follows a 12-step migration workflow:
+TransDock follows a 13-step migration workflow:
 
 1. **Validation** - Check inputs and ZFS availability
 2. **Parsing** - Parse docker-compose file
@@ -174,6 +175,7 @@ TransDock follows a 12-step migration workflow:
 10. **Path Updates** - Update compose file paths
 11. **Stack Startup** - Start stack on target machine
 12. **Cleanup** - Remove temporary snapshots
+13. **Verification** - Verify container deployment and health
 
 ## 🎯 Use Cases
 

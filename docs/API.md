@@ -230,6 +230,7 @@ Migration status can be one of:
 - `updating` - Updating compose file paths
 - `starting` - Starting compose stack on target
 - `cleaning` - Cleaning up snapshots
+- `verifying` - Verifying container deployment and health
 - `completed` - Migration completed successfully
 - `failed` - Migration failed with error
 
