@@ -12,7 +12,7 @@ from ..core.value_objects.size_value import SizeValue
 from ..core.exceptions.zfs_exceptions import (
     SnapshotException, 
     SnapshotNotFoundError, 
-    SnapshotExistsError,
+    SnapshotAlreadyExistsError,
     DatasetException
 )
 from ..core.exceptions.validation_exceptions import ValidationException
@@ -51,7 +51,7 @@ class SnapshotService:
             if exists_result.is_failure:
                 return Result.failure(exists_result.error)
             if exists_result.value:
-                return Result.failure(SnapshotExistsError(full_snapshot_name))
+                return Result.failure(SnapshotAlreadyExistsError(full_snapshot_name))
             
             # Build create command
             command_args = ["snapshot"]
@@ -62,7 +62,7 @@ class SnapshotService:
             # Execute create command
             result = await self._executor.execute_zfs(*command_args)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(SnapshotException(
                     f"Failed to create snapshot: {result.stderr}",
                     error_code="SNAPSHOT_CREATE_FAILED"
@@ -106,7 +106,7 @@ class SnapshotService:
                 full_snapshot_name
             )
             
-            if not result.is_success:
+            if not result.success:
                 if "dataset does not exist" in result.stderr.lower():
                     return Result.failure(SnapshotNotFoundError(full_snapshot_name))
                 return Result.failure(SnapshotException(
@@ -156,7 +156,7 @@ class SnapshotService:
             # Execute command
             result = await self._executor.execute_zfs(*command_args)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(SnapshotException(
                     f"Failed to list snapshots: {result.stderr}",
                     error_code="SNAPSHOT_LIST_FAILED"
@@ -210,7 +210,7 @@ class SnapshotService:
             # Execute destroy command
             result = await self._executor.execute_zfs(*command_args)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(SnapshotException(
                     f"Failed to destroy snapshot: {result.stderr}",
                     error_code="SNAPSHOT_DESTROY_FAILED"
@@ -256,7 +256,7 @@ class SnapshotService:
             # Execute rollback command
             result = await self._executor.execute_zfs(*command_args)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(SnapshotException(
                     f"Failed to rollback to snapshot: {result.stderr}",
                     error_code="SNAPSHOT_ROLLBACK_FAILED"
@@ -359,7 +359,7 @@ class SnapshotService:
                         snapshot.name, 
                         force=True
                     )
-                    if destroy_result.is_success:
+                    if destroy_result.success:
                         deleted_count += 1
                     else:
                         failed_deletions.append({
@@ -472,7 +472,7 @@ class SnapshotService:
             result = await self._executor.execute_zfs(
                 "list", "-H", "-t", "snapshot", "-o", "name", full_snapshot_name
             )
-            return Result.success(result.is_success)
+            return Result.success(result.success)
         except Exception as e:
             return Result.failure(SnapshotException(
                 f"Failed to check snapshot existence: {str(e)}",
@@ -490,7 +490,7 @@ class SnapshotService:
                 "bookmark", f"{dataset_name}@{snapshot_name}", bookmark_name
             )
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(SnapshotException(
                     f"Failed to create bookmark: {result.stderr}",
                     error_code="BOOKMARK_CREATE_FAILED"
@@ -511,7 +511,7 @@ class SnapshotService:
                 "get", "-H", "-o", "value", "compressratio", str(dataset_name)
             )
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(SnapshotException(
                     f"Failed to get compression ratio: {result.stderr}",
                     error_code="COMPRESSION_RATIO_FAILED"
@@ -539,7 +539,7 @@ class SnapshotService:
                 "get", "-H", "-o", "value", "dedup", str(dataset_name)
             )
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(SnapshotException(
                     f"Failed to get deduplication ratio: {result.stderr}",
                     error_code="DEDUPLICATION_RATIO_FAILED"

@@ -2,7 +2,7 @@
 Concrete implementation of security validator interface.
 """
 import re
-from typing import List, Optional
+from typing import List, Optional, Dict
 from ..core.interfaces.security_validator import ISecurityValidator
 from ..core.value_objects.ssh_config import SSHConfig
 from ..core.exceptions.validation_exceptions import (
@@ -264,3 +264,26 @@ class SecurityValidator(ISecurityValidator):
         # Simple escaping - wrap in single quotes and escape any single quotes
         escaped = arg.replace("'", "'\"'\"'")
         return f"'{escaped}'"
+    
+    def validate_zfs_properties(self, properties: Dict[str, str]) -> Dict[str, str]:
+        """Validate multiple ZFS properties."""
+        if not properties:
+            return {}
+        
+        validated_properties = {}
+        for property_name, value in properties.items():
+            try:
+                validated_name, validated_value = self.validate_zfs_property(property_name, value)
+                validated_properties[validated_name] = validated_value
+            except Exception as e:
+                raise SecurityValidationError(f"Property validation failed for {property_name}: {str(e)}")
+        
+        return validated_properties
+    
+    def validate_pool_name(self, pool_name: str) -> str:
+        """Validate and sanitize pool name."""
+        if not pool_name or not isinstance(pool_name, str):
+            raise SecurityValidationError("Pool name cannot be empty or non-string")
+        
+        # Use same validation as dataset name for consistency
+        return self.validate_dataset_name(pool_name)

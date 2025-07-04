@@ -11,8 +11,7 @@ from ..core.value_objects.size_value import SizeValue
 from ..core.exceptions.zfs_exceptions import (
     DatasetException, 
     DatasetNotFoundError, 
-    DatasetExistsError,
-    InvalidDatasetNameError
+    DatasetAlreadyExistsError
 )
 from ..core.exceptions.validation_exceptions import ValidationException
 from ..core.result import Result
@@ -45,7 +44,7 @@ class DatasetService:
                 str(name)
             )
             
-            if not result.is_success:
+            if not result.success:
                 if "dataset does not exist" in result.stderr.lower():
                     return Result.failure(DatasetNotFoundError(str(name)))
                 return Result.failure(DatasetException(
@@ -96,7 +95,7 @@ class DatasetService:
             
             result = await self._executor.execute_zfs(*command_args)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(DatasetException(
                     f"Failed to list datasets: {result.stderr}",
                     error_code="DATASET_LIST_FAILED"
@@ -134,7 +133,7 @@ class DatasetService:
             if exists_result.is_failure:
                 return Result.failure(exists_result.error)
             if exists_result.value:
-                return Result.failure(DatasetExistsError(str(name)))
+                return Result.failure(DatasetAlreadyExistsError(str(name)))
             
             # Build create command
             command_args = ["create"]
@@ -156,7 +155,7 @@ class DatasetService:
             # Execute create command
             result = await self._executor.execute_zfs(*command_args)
             
-            if not result.is_success:
+            if not result.success:
                 return Result.failure(DatasetException(
                     f"Failed to create dataset: {result.stderr}",
                     error_code="DATASET_CREATE_FAILED"

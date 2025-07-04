@@ -12,6 +12,13 @@ from .security_utils import SecurityUtils, SecurityValidationError
 from .zfs_ops import ZFSOperations
 from datetime import datetime, timezone
 
+# Import new API layer
+from .api.routers import dataset_router, snapshot_router, pool_router
+from .api.routers.auth_router import router as auth_router
+from .api.middleware import ErrorHandlingMiddleware, LoggingMiddleware, SecurityHeadersMiddleware
+from .api.rate_limiting import RateLimitMiddleware, default_rate_limiter
+from .api.websocket import ws_router
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -19,9 +26,97 @@ logging.basicConfig(
 )
 
 app = FastAPI(
-    title="TransDock - Docker Stack Migration Tool",
-    description="Migrate Docker Compose stacks between machines using ZFS snapshots",
-    version="1.0.0")
+    title="TransDock - ZFS Management Platform",
+    description="""
+    **TransDock** is a comprehensive ZFS management platform that evolved from a Docker migration tool.
+    
+    ## Features
+    
+    * **ZFS Operations**: Complete ZFS dataset, snapshot, and pool management
+    * **Docker Migration**: Migrate Docker Compose stacks between machines using ZFS snapshots
+    * **Real-time Monitoring**: WebSocket-based real-time system monitoring
+    * **Authentication**: JWT-based authentication and authorization
+    * **Rate Limiting**: Built-in API rate limiting and protection
+    * **RESTful API**: Clean, well-documented REST API with OpenAPI specification
+    
+    ## API Categories
+    
+    * **Authentication** (`/auth`): User authentication and management
+    * **Datasets** (`/api/datasets`): ZFS dataset operations
+    * **Snapshots** (`/api/snapshots`): ZFS snapshot management
+    * **Pools** (`/api/pools`): ZFS pool monitoring and management
+    * **Migration** (`/api/migrations`): Docker stack migration operations
+    * **WebSocket** (`/ws`): Real-time monitoring and notifications
+    
+    ## Authentication
+    
+    Most endpoints require authentication. Use the `/auth/login` endpoint to obtain a JWT token,
+    then include it in the `Authorization` header as `Bearer <token>`.
+    
+    ## Rate Limiting
+    
+    API endpoints are rate-limited to prevent abuse. Rate limit information is included in response headers.
+    
+    ## WebSocket
+    
+    Real-time monitoring is available via WebSocket at `/ws/monitor`. Authentication is optional via query parameter.
+    """,
+    version="2.0.0",
+    contact={
+        "name": "TransDock Development Team",
+        "email": "support@transdock.local",
+    },
+    license_info={
+        "name": "MIT License",
+        "url": "https://opensource.org/licenses/MIT",
+    },
+    openapi_tags=[
+        {
+            "name": "Authentication",
+            "description": "User authentication and management operations",
+        },
+        {
+            "name": "Datasets", 
+            "description": "ZFS dataset operations including creation, deletion, and property management",
+        },
+        {
+            "name": "Snapshots",
+            "description": "ZFS snapshot management including creation, deletion, and rollback operations",
+        },
+        {
+            "name": "Pools",
+            "description": "ZFS pool monitoring and management operations",
+        },
+        {
+            "name": "Migration",
+            "description": "Docker stack migration operations between machines",
+        },
+        {
+            "name": "WebSocket",
+            "description": "Real-time monitoring and notifications via WebSocket",
+        },
+        {
+            "name": "System",
+            "description": "System information and health check endpoints",
+        },
+    ],
+    servers=[
+        {
+            "url": "http://localhost:8000",
+            "description": "Development server"
+        },
+        {
+            "url": "https://api.transdock.local",
+            "description": "Production server"
+        }
+    ]
+)
+
+# Add new API middleware
+app.add_middleware(ErrorHandlingMiddleware)
+app.add_middleware(LoggingMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RateLimitMiddleware, rate_limiter=default_rate_limiter)
 
 # Enable CORS for web frontend
 app.add_middleware(
@@ -31,6 +126,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include new API routers
+app.include_router(auth_router)
+app.include_router(dataset_router)
+app.include_router(snapshot_router)
+app.include_router(pool_router)
+app.include_router(ws_router)
 
 # Initialize services
 migration_service = MigrationService()

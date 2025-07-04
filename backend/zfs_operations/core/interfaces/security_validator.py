@@ -1,5 +1,8 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List, Optional, Dict, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..value_objects.ssh_config import SSHConfig
 
 
 class ISecurityValidator(ABC):
@@ -41,6 +44,21 @@ class ISecurityValidator(ABC):
         pass
     
     @abstractmethod
+    def validate_snapshot_name(self, snapshot_name: str) -> str:
+        """Validate and sanitize snapshot name"""
+        pass
+    
+    @abstractmethod
     def escape_shell_argument(self, arg: str) -> str:
         """Escape shell argument to prevent injection"""
+        pass
+    
+    @abstractmethod
+    def validate_zfs_properties(self, properties: Dict[str, str]) -> Dict[str, str]:
+        """Validate multiple ZFS properties"""
+        pass
+    
+    @abstractmethod
+    def validate_pool_name(self, pool_name: str) -> str:
+        """Validate and sanitize pool name"""
         pass 

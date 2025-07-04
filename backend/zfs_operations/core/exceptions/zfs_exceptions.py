@@ -114,6 +114,17 @@ class PoolHealthError(PoolException):
         )
 
 
+class PoolUnavailableError(PoolException):
+    """Pool unavailable exception"""
+    
+    def __init__(self, message: str):
+        super().__init__(
+            message,
+            error_code="POOL_UNAVAILABLE",
+            details={"message": message}
+        )
+
+
 class RemoteOperationException(ZFSException):
     """Remote operation exceptions"""
     pass

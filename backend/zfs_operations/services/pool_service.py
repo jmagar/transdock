@@ -7,7 +7,7 @@ from ..core.interfaces.command_executor import ICommandExecutor
 from ..core.interfaces.security_validator import ISecurityValidator  
 from ..core.interfaces.logger_interface import ILogger
 from ..core.entities.pool import Pool
-from ..core.entities.vdev import VDev
+from ..core.entities.pool import VDev
 from ..core.value_objects.size_value import SizeValue
 from ..core.exceptions.zfs_exceptions import (
     PoolException, 
@@ -63,14 +63,14 @@ class PoolService:
             
             pool = Pool(
                 name=pool_name,
-                state=pool_data.get('state', 'UNKNOWN'),
-                health=pool_data.get('health', 'UNKNOWN'),
-                capacity_percent=pool_data.get('capacity_percent', 0),
-                fragmentation_percent=pool_data.get('fragmentation_percent', 0),
+                state=pool_data.get('state', 'ONLINE'),  # Use PoolState enum value
                 size=pool_data.get('size', SizeValue(0)),
                 allocated=pool_data.get('allocated', SizeValue(0)),
                 free=pool_data.get('free', SizeValue(0)),
-                vdevs=pool_data.get('vdevs', [])
+                properties=pool_data.get('properties', {}),
+                vdevs=pool_data.get('vdevs', []),
+                scan_stats=pool_data.get('scan_stats'),
+                errors=pool_data.get('errors', {})
             )
             
             self._logger.info(f"Successfully fetched pool: {pool_name}")
