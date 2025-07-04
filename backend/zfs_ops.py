@@ -216,6 +216,32 @@ class ZFSOperations:
                 else:
                     logger.warning(f"Could not get mountpoint for {target_dataset}: {mp_stderr}")
                     dataset_mount_path = None
+                    
+                # Clean up any existing snapshots on the target dataset
+                logger.info(f"Checking for existing snapshots on {target_dataset}")
+                list_snapshots_cmd = SecurityUtils.validate_zfs_command_args("list", "-H", "-t", "snapshot", "-o", "name", "-s", "name", target_dataset)
+                list_snapshots_cmd_str = " ".join(list_snapshots_cmd)
+                snapshots_ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, list_snapshots_cmd_str)
+                
+                snap_returncode, snap_stdout, snap_stderr = await self.run_command(snapshots_ssh_cmd)
+                if snap_returncode == 0 and snap_stdout.strip():
+                    existing_snapshots = [line.strip() for line in snap_stdout.strip().split('\n') if line.strip()]
+                    logger.info(f"Found {len(existing_snapshots)} existing snapshots on {target_dataset}")
+                    
+                    # Destroy each existing snapshot
+                    for snapshot in existing_snapshots:
+                        logger.info(f"Destroying existing snapshot: {snapshot}")
+                        destroy_cmd = SecurityUtils.validate_zfs_command_args("destroy", snapshot)
+                        destroy_cmd_str = " ".join(destroy_cmd)
+                        destroy_ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, destroy_cmd_str)
+                        
+                        destroy_returncode, destroy_stdout, destroy_stderr = await self.run_command(destroy_ssh_cmd)
+                        if destroy_returncode == 0:
+                            logger.info(f"Successfully destroyed snapshot: {snapshot}")
+                        else:
+                            logger.warning(f"Failed to destroy snapshot {snapshot}: {destroy_stderr}")
+                else:
+                    logger.info(f"No existing snapshots found on {target_dataset}")
             else:
                 logger.info(f"Target dataset {target_dataset} does not exist")
                 
