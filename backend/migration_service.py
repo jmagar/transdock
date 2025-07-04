@@ -1,7 +1,9 @@
 import asyncio
+import json
 import os
 import uuid
 import logging
+import yaml
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from .models import MigrationRequest, MigrationStatus, VolumeMount, TransferMethod
@@ -246,7 +248,7 @@ class MigrationService:
                 await self.zfs_ops.cleanup_snapshot(snapshot_name)
             
             # Step 12: Start the stack on target system
-            await self._update_status(migration_id, "starting", 99, "Starting stack on target system")
+            await self._update_status(migration_id, "starting", 98, "Starting stack on target system")
             
             stack_started = await self.docker_ops.start_compose_stack_remote(
                 request.target_host, compose_target_path, request.ssh_user, request.ssh_port
@@ -256,7 +258,18 @@ class MigrationService:
                 logger.warning(f"Failed to start stack on target system for migration {migration_id}")
                 # Don't fail the migration, just log warning
             
-            # Step 13: Complete migration
+            # Step 13: Verify migration success
+            await self._update_status(migration_id, "verifying", 99, "Verifying migration success")
+            
+            verification_success = await self._verify_migration_success(
+                migration_id, request, compose_target_path, volume_mapping
+            )
+            
+            if not verification_success:
+                logger.warning(f"Migration verification failed for {migration_id}")
+                # Log warning but don't fail the migration
+            
+            # Step 14: Complete migration
             await self._update_status(migration_id, "completed", 100, "Migration completed successfully")
             
             # Store final configuration
@@ -269,6 +282,136 @@ class MigrationService:
         except Exception as e:
             await self._update_error(migration_id, str(e))
             logger.exception(f"Migration {migration_id} failed")
+    
+    async def _verify_migration_success(self, migration_id: str, request: MigrationRequest, 
+                                       compose_target_path: str, volume_mapping: Dict[str, str]) -> bool:
+        """
+        Verify that the migration was successful by checking the target system.
+        
+        Args:
+            migration_id: ID of the migration
+            request: Original migration request
+            compose_target_path: Path to the compose file on target
+            volume_mapping: Mapping of old paths to new paths
+            
+        Returns:
+            bool: True if verification successful, False otherwise
+        """
+        try:
+            logger.info(f"Verifying migration {migration_id} on target system {request.target_host}")
+            
+            # Step 1: Check if containers are running
+            logger.info(f"Checking container status on {request.target_host}")
+            docker_ps_cmd = ["docker", "ps", "--format", "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"]
+            docker_ps_cmd_str = " ".join(docker_ps_cmd)
+            
+            ssh_cmd = SecurityUtils.build_ssh_command(
+                request.target_host, request.ssh_user, request.ssh_port, docker_ps_cmd_str
+            )
+            
+            returncode, stdout, stderr = await self.docker_ops.run_command(ssh_cmd)
+            if returncode == 0:
+                logger.info(f"Container status on {request.target_host}:")
+                logger.info(stdout)
+            else:
+                logger.error(f"Failed to check container status: {stderr}")
+                return False
+            
+            # Step 2: Get container names from compose file
+            try:
+                # Parse compose file to get service names
+                compose_file_path = os.path.join(compose_target_path, "docker-compose.yml")
+                
+                # Read the compose file from target
+                cat_cmd = ["cat", compose_file_path]
+                cat_cmd_str = " ".join(cat_cmd)
+                ssh_cmd = SecurityUtils.build_ssh_command(
+                    request.target_host, request.ssh_user, request.ssh_port, cat_cmd_str
+                )
+                
+                returncode, compose_content, stderr = await self.docker_ops.run_command(ssh_cmd)
+                if returncode != 0:
+                    logger.error(f"Failed to read compose file from target: {stderr}")
+                    return False
+                
+                # Parse compose file to get service names
+                compose_data = yaml.safe_load(compose_content)
+                services = compose_data.get('services', {})
+                
+                # Step 3: Inspect each service container
+                verification_success = True
+                for service_name in services.keys():
+                    logger.info(f"Inspecting container for service '{service_name}'")
+                    
+                    # Get container name - Docker Compose typically uses format: directory_service_1
+                    container_name = f"{os.path.basename(compose_target_path)}_{service_name}_1"
+                    
+                    # Use docker inspect to get detailed container info
+                    inspect_cmd = ["docker", "inspect", container_name]
+                    inspect_cmd_str = " ".join(inspect_cmd)
+                    ssh_cmd = SecurityUtils.build_ssh_command(
+                        request.target_host, request.ssh_user, request.ssh_port, inspect_cmd_str
+                    )
+                    
+                    returncode, inspect_output, stderr = await self.docker_ops.run_command(ssh_cmd)
+                    if returncode == 0:
+                        try:
+                            container_info = json.loads(inspect_output)
+                            
+                            if container_info and len(container_info) > 0:
+                                container = container_info[0]
+                                
+                                # Check if container is running
+                                state = container.get('State', {})
+                                if state.get('Running', False):
+                                    logger.info(f"✅ Container {container_name} is running")
+                                else:
+                                    logger.error(f"❌ Container {container_name} is not running")
+                                    verification_success = False
+                                
+                                # Check volume mounts
+                                mounts = container.get('Mounts', [])
+                                logger.info(f"Volume mounts for {container_name}:")
+                                for mount in mounts:
+                                    source = mount.get('Source', '')
+                                    destination = mount.get('Destination', '')
+                                    mount_type = mount.get('Type', '')
+                                    logger.info(f"  {mount_type}: {source} -> {destination}")
+                                    
+                                    # Verify that the source path is using the new migrated path
+                                    if mount_type == 'bind':
+                                        # Check if this mount uses one of our migrated paths
+                                        for old_path, new_path in volume_mapping.items():
+                                            if new_path in source:
+                                                logger.info(f"✅ Volume mount using migrated path: {source}")
+                                                break
+                                
+                                # Check network configuration
+                                networks = container.get('NetworkSettings', {}).get('Networks', {})
+                                for network_name, network_info in networks.items():
+                                    ip_address = network_info.get('IPAddress', 'N/A')
+                                    logger.info(f"Network {network_name}: {ip_address}")
+                                    
+                            else:
+                                logger.error(f"❌ No container info found for {container_name}")
+                                verification_success = False
+                                
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Failed to parse docker inspect output: {e}")
+                            verification_success = False
+                    else:
+                        logger.error(f"❌ Failed to inspect container {container_name}: {stderr}")
+                        verification_success = False
+                
+                return verification_success
+                
+            except Exception as e:
+                logger.error(f"Error during container verification: {e}")
+                return False
+            
+        except Exception as e:
+            logger.error(f"Error during migration verification: {e}")
+            return False
     
     async def cancel_migration(self, migration_id: str) -> bool:
         """Cancel a running migration"""
