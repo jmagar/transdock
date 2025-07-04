@@ -18,6 +18,17 @@ When the backend is running, you can access interactive API documentation at:
 
 Currently, no authentication is required. Future versions may implement API key or OAuth authentication.
 
+## Security Features
+
+TransDock includes comprehensive security validation to protect against:
+- **Path traversal attacks** - All paths are sanitized and validated
+- **Command injection** - User inputs are escaped and validated
+- **SSH injection** - Hostnames and usernames are validated with strict patterns
+- **ZFS injection** - All ZFS commands are validated against allowed operations
+- **Input validation** - All API inputs are validated for format and content
+
+Security validation errors return `422 Unprocessable Entity` status codes with descriptive error messages.
+
 ## Endpoints
 
 ### System Information
@@ -142,7 +153,7 @@ Analyze a compose stack and return volume information.
 ### Migration Operations
 
 #### POST /migrations
-Start a new migration process.
+Start a new migration process with comprehensive security validation.
 
 **Request Body:**
 ```json
@@ -155,6 +166,13 @@ Start a new migration process.
   "force_rsync": false
 }
 ```
+
+**Security Validation:**
+- `compose_dataset`: Validated for path traversal and injection attacks
+- `target_host`: Validated against hostname patterns, prevents command injection
+- `target_base_path`: Sanitized for path traversal prevention
+- `ssh_user`: Validated against username patterns
+- `ssh_port`: Validated for valid port range (1-65535)
 
 **Response:**
 ```json
@@ -190,7 +208,7 @@ List all migrations.
 Get the status of a specific migration.
 
 **Parameters:**
-- `migration_id` (path): UUID of the migration
+- `migration_id` (path): UUID of the migration (validated for format and security)
 
 **Response:**
 ```json
@@ -215,6 +233,27 @@ Get the status of a specific migration.
 }
 ```
 
+#### POST /migrations/{migration_id}/cancel
+Cancel a running migration.
+
+**Parameters:**
+- `migration_id` (path): UUID of the migration to cancel
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Migration cancelled successfully"
+}
+```
+
+**Error Response:**
+```json
+{
+  "detail": "Migration not found"
+}
+```
+
 ## Status Values
 
 Migration status can be one of:
@@ -230,7 +269,7 @@ Migration status can be one of:
 - `updating` - Updating compose file paths
 - `starting` - Starting compose stack on target
 - `cleaning` - Cleaning up snapshots
-- `verifying` - Verifying container deployment and health
+- `verifying` - Verifying container deployment and health with smart container name detection
 - `completed` - Migration completed successfully
 - `failed` - Migration failed with error
 
@@ -245,11 +284,44 @@ All endpoints return appropriate HTTP status codes:
 - `200` - Success
 - `400` - Bad Request (invalid parameters)
 - `404` - Not Found (migration/stack not found)
+- `422` - Unprocessable Entity (security validation failed)
 - `500` - Internal Server Error
 
-Error responses include details:
+### Security Validation Errors (422)
+
+When security validation fails, the API returns a 422 status code with details:
+```json
+{
+  "detail": "Security validation failed: Invalid hostname format: host; rm -rf /"
+}
+```
+
+Common security validation errors:
+- Invalid hostname format (contains special characters)
+- Path traversal attempts in paths
+- Command injection attempts in user inputs
+- Invalid port numbers or ranges
+- Malformed migration IDs
+
+### Standard Error Responses
+
+Other error responses include details:
 ```json
 {
   "detail": "Migration not found"
 }
-``` 
+```
+
+## Migration Verification
+
+The verification process includes:
+- **Smart Container Detection**: Automatically detects container names using multiple Docker Compose naming patterns
+- **Health Checks**: Verifies containers are running and healthy
+- **Volume Validation**: Confirms volumes are properly mounted with updated paths
+- **Service Validation**: Ensures all services from the compose file are operational
+
+The verification system handles various Docker Compose naming conventions:
+- Legacy format: `project_service_1`
+- Modern format: `project-service-1`
+- Simplified format: `project_service` or `project-service`
+- Single service: `project` or `service` 

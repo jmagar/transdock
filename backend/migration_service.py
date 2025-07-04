@@ -5,11 +5,12 @@ import uuid
 import logging
 import yaml
 from datetime import datetime
-from typing import Dict, List, Any
-from .models import MigrationRequest, MigrationStatus, TransferMethod
+from typing import Dict, List, Any, Tuple
+from .models import MigrationRequest, MigrationStatus, TransferMethod, HostInfo
 from .zfs_ops import ZFSOperations
 from .docker_ops import DockerOperations
 from .transfer_ops import TransferOperations
+from .host_service import HostService
 from .security_utils import SecurityUtils, SecurityValidationError
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class MigrationService:
         self.docker_ops = DockerOperations()
         # Pass ZFS operations to transfer operations to avoid duplication
         self.transfer_ops = TransferOperations(zfs_ops=self.zfs_ops)
+        self.host_service = HostService()
         self.active_migrations: Dict[str, MigrationStatus] = {}
 
     def create_migration_id(self) -> str:
@@ -40,6 +42,12 @@ class MigrationService:
                 request.ssh_port,
                 request.target_base_path
             )
+            
+            # Validate source host if specified
+            if request.source_host:
+                SecurityUtils.validate_hostname(request.source_host)
+                SecurityUtils.validate_username(request.source_ssh_user)
+                SecurityUtils.validate_port(request.source_ssh_port)
         except SecurityValidationError as e:
             raise ValueError(f"Security validation failed: {e}") from e
 
@@ -49,6 +57,7 @@ class MigrationService:
             status="initializing",
             progress=0,
             message="Starting migration process",
+            source_host=request.source_host,
             compose_dataset=request.compose_dataset,
             target_host=request.target_host,
             target_base_path=request.target_base_path
@@ -96,27 +105,78 @@ class MigrationService:
             request: MigrationRequest):
         """Execute the complete migration process"""
         try:
+            # Determine if source is remote or local
+            is_remote_source = request.source_host is not None
+            
             # Step 1: Validate inputs and check ZFS availability
-            await self._update_status(migration_id, "validating", 5, "Validating inputs and checking ZFS")
+            await self._update_status(migration_id, "validating", 5, 
+                                      "Validating inputs and checking ZFS availability")
 
-            if not await self.zfs_ops.is_zfs_available():
-                raise Exception("ZFS is not available on the source system")
+            if is_remote_source:
+                # Check remote source capabilities
+                if not request.source_host:
+                    raise Exception("Source host is required for remote migration")
+                
+                source_host_info = HostInfo(
+                    hostname=request.source_host,
+                    ssh_user=request.source_ssh_user,
+                    ssh_port=request.source_ssh_port
+                )
+                source_capabilities = await self.host_service.check_host_capabilities(source_host_info)
+                
+                if not source_capabilities.docker_available:
+                    raise Exception("Docker is not available on the source system")
+                
+                # For remote source, ZFS is optional (can use rsync)
+                source_has_zfs = source_capabilities.zfs_available
+            else:
+                # Local source - check local ZFS availability
+                source_has_zfs = await self.zfs_ops.is_zfs_available()
 
             # Get compose directory path
-            compose_dir = self.docker_ops.get_compose_path(
-                request.compose_dataset)
-            if not os.path.exists(compose_dir):
-                raise Exception(f"Compose dataset not found: {compose_dir}")
+            compose_dir = self.docker_ops.get_compose_path(request.compose_dataset)
+            
+            # Check if compose directory exists
+            if is_remote_source:
+                test_cmd = f"test -d {SecurityUtils.escape_shell_argument(compose_dir)} && echo 'exists' || echo 'not_found'"
+                returncode, stdout, stderr = await self.host_service.run_remote_command(source_host_info, test_cmd)
+                if returncode != 0 or 'not_found' in stdout:
+                    raise Exception(f"Compose dataset not found: {compose_dir}")
+            else:
+                if not os.path.exists(compose_dir):
+                    raise Exception(f"Compose dataset not found: {compose_dir}")
 
             # Step 2: Find and parse compose file
             await self._update_status(migration_id, "parsing", 10, "Parsing docker-compose file")
 
-            compose_file = await self.docker_ops.find_compose_file(compose_dir)
-            if not compose_file:
-                raise Exception(
-                    f"No docker-compose file found in {compose_dir}")
-
-            compose_data = await self.docker_ops.parse_compose_file(compose_file)
+            if is_remote_source:
+                # Find compose file remotely
+                compose_file = None
+                for filename in ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]:
+                    test_path = os.path.join(compose_dir, filename)
+                    test_cmd = f"test -f {SecurityUtils.escape_shell_argument(test_path)} && echo 'exists' || echo 'not_found'"
+                    returncode, stdout, stderr = await self.host_service.run_remote_command(source_host_info, test_cmd)
+                    if returncode == 0 and 'exists' in stdout:
+                        compose_file = test_path
+                        break
+                
+                if not compose_file:
+                    raise Exception(f"No docker-compose file found in {compose_dir}")
+                
+                # Read compose file from remote host
+                cat_cmd = f"cat {SecurityUtils.escape_shell_argument(compose_file)}"
+                returncode, stdout, stderr = await self.host_service.run_remote_command(source_host_info, cat_cmd)
+                if returncode != 0:
+                    raise Exception(f"Failed to read compose file: {stderr}")
+                
+                compose_data = yaml.safe_load(stdout)
+            else:
+                # Local compose file handling
+                compose_file = await self.docker_ops.find_compose_file(compose_dir)
+                if not compose_file:
+                    raise Exception(f"No docker-compose file found in {compose_dir}")
+                
+                compose_data = await self.docker_ops.parse_compose_file(compose_file)
 
             # Step 3: Extract volume mounts
             await self._update_status(migration_id, "analyzing", 15, "Analyzing volume mounts")
@@ -124,47 +184,37 @@ class MigrationService:
             volumes = await self.docker_ops.extract_volume_mounts(compose_data)
             self.active_migrations[migration_id].volumes = volumes
 
-            logger.info(
-                f"Found {len(volumes)} volume mounts for migration {migration_id}")
+            logger.info(f"Found {len(volumes)} volume mounts for migration {migration_id}")
 
             # Step 4: Stop the compose stack
             await self._update_status(migration_id, "stopping", 20, "Stopping Docker compose stack")
 
-            if not await self.docker_ops.stop_compose_stack(compose_dir):
-                raise Exception("Failed to stop Docker compose stack")
+            if is_remote_source:
+                # Stop remote compose stack
+                success = await self.host_service.stop_remote_stack(source_host_info, compose_dir)
+                if not success:
+                    raise Exception("Failed to stop Docker compose stack")
+            else:
+                # Stop local compose stack
+                if not await self.docker_ops.stop_compose_stack(compose_dir):
+                    raise Exception("Failed to stop Docker compose stack")
 
-            # Step 5: Create snapshots for compose and volume datasets
-            await self._update_status(migration_id, "snapshotting", 25, "Creating ZFS snapshots")
-
+            # Step 5: Create snapshots (if ZFS is available on source)
             snapshots = []
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            # Snapshot the compose dataset
-            if not await self.zfs_ops.is_dataset(compose_dir) and not await self.zfs_ops.create_dataset(compose_dir):
-                raise Exception(f"Failed to convert {compose_dir} to dataset")
-
-            compose_snapshot = await self.zfs_ops.create_snapshot(compose_dir, f"migration_{timestamp}")
-            snapshots.append((compose_snapshot, compose_dir))
-
-            # Process each volume mount
-            for i, volume in enumerate(volumes):
-                progress = 25 + (i + 1) * (35 / len(volumes))
-                await self._update_status(
-                    migration_id, "snapshotting", int(progress),
-                    f"Creating snapshot for {volume.source}"
-                )
-
-                # Check if volume source is a dataset, convert if not
-                if not await self.zfs_ops.is_dataset(volume.source) and not await self.zfs_ops.create_dataset(volume.source):
-                    logger.warning(
-                        f"Failed to convert {volume.source} to dataset, skipping...")
-                    continue
-
-                # Create snapshot
-                volume_snapshot = await self.zfs_ops.create_snapshot(volume.source, f"migration_{timestamp}")
-                snapshots.append((volume_snapshot, volume.source))
-                volume.is_dataset = True
-                volume.dataset_path = await self.zfs_ops.get_dataset_name(volume.source)
+            
+            if source_has_zfs:
+                await self._update_status(migration_id, "snapshotting", 25, "Creating ZFS snapshots")
+                
+                if is_remote_source:
+                    # Create snapshots on remote host
+                    snapshots = await self._create_remote_snapshots(source_host_info, compose_dir, volumes, timestamp)
+                else:
+                    # Create snapshots locally
+                    snapshots = await self._create_local_snapshots(compose_dir, volumes, timestamp)
+            else:
+                # No ZFS available, will use rsync
+                await self._update_status(migration_id, "preparing", 25, "No ZFS available, will use rsync")
 
             # Step 6: Determine transfer method
             await self._update_status(migration_id, "checking", 60, "Checking target system capabilities")
@@ -173,7 +223,7 @@ class MigrationService:
                 request.target_host, request.ssh_user, request.ssh_port
             )
 
-            if request.force_rsync or not has_remote_zfs:
+            if request.force_rsync or not source_has_zfs or not has_remote_zfs:
                 transfer_method = TransferMethod.RSYNC
                 await self._update_status(migration_id, "preparing", 65, "Preparing rsync transfer")
             else:
@@ -745,3 +795,87 @@ class MigrationService:
                              "is_dataset": v.is_dataset} for v in volumes],
                 "services": list(compose_data.get('services',
                                                   {}).keys())}
+
+    async def _create_local_snapshots(self, compose_dir: str, volumes: List, timestamp: str) -> List[Tuple[str, str]]:
+        """Create ZFS snapshots locally"""
+        snapshots = []
+        
+        # Snapshot the compose dataset
+        if not await self.zfs_ops.is_dataset(compose_dir) and not await self.zfs_ops.create_dataset(compose_dir):
+            raise Exception(f"Failed to convert {compose_dir} to dataset")
+
+        compose_snapshot = await self.zfs_ops.create_snapshot(compose_dir, f"migration_{timestamp}")
+        snapshots.append((compose_snapshot, compose_dir))
+
+        # Process each volume mount
+        for i, volume in enumerate(volumes):
+            # Check if volume source is a dataset, convert if not
+            if not await self.zfs_ops.is_dataset(volume.source) and not await self.zfs_ops.create_dataset(volume.source):
+                logger.warning(f"Failed to convert {volume.source} to dataset, skipping...")
+                continue
+
+            # Create snapshot
+            volume_snapshot = await self.zfs_ops.create_snapshot(volume.source, f"migration_{timestamp}")
+            snapshots.append((volume_snapshot, volume.source))
+            volume.is_dataset = True
+            volume.dataset_path = await self.zfs_ops.get_dataset_name(volume.source)
+        
+        return snapshots
+    
+    async def _create_remote_snapshots(self, source_host_info: HostInfo, compose_dir: str, volumes: List, timestamp: str) -> List[Tuple[str, str]]:
+        """Create ZFS snapshots on remote host"""
+        snapshots = []
+        
+        # Check if compose directory is a dataset, convert if not
+        zfs_list_cmd = f"zfs list -H {SecurityUtils.escape_shell_argument(compose_dir)} 2>/dev/null"
+        returncode, stdout, stderr = await self.host_service.run_remote_command(source_host_info, zfs_list_cmd)
+        
+        if returncode != 0:
+            # Try to create dataset
+            dataset_name = compose_dir.replace('/mnt/', '')
+            zfs_create_cmd = f"zfs create -p {SecurityUtils.escape_shell_argument(dataset_name)}"
+            returncode, stdout, stderr = await self.host_service.run_remote_command(source_host_info, zfs_create_cmd)
+            if returncode != 0:
+                raise Exception(f"Failed to convert {compose_dir} to dataset: {stderr}")
+        
+        # Create snapshot for compose dataset
+        dataset_name = compose_dir.replace('/mnt/', '')
+        snapshot_name = f"{dataset_name}@migration_{timestamp}"
+        zfs_snapshot_cmd = f"zfs snapshot {SecurityUtils.escape_shell_argument(snapshot_name)}"
+        returncode, stdout, stderr = await self.host_service.run_remote_command(source_host_info, zfs_snapshot_cmd)
+        
+        if returncode != 0:
+            raise Exception(f"Failed to create snapshot for {compose_dir}: {stderr}")
+        
+        snapshots.append((snapshot_name, compose_dir))
+        
+        # Process each volume mount
+        for volume in volumes:
+            # Check if volume source is a dataset
+            zfs_list_cmd = f"zfs list -H {SecurityUtils.escape_shell_argument(volume.source)} 2>/dev/null"
+            returncode, stdout, stderr = await self.host_service.run_remote_command(source_host_info, zfs_list_cmd)
+            
+            if returncode != 0:
+                # Try to create dataset
+                dataset_name = volume.source.replace('/mnt/', '')
+                zfs_create_cmd = f"zfs create -p {SecurityUtils.escape_shell_argument(dataset_name)}"
+                returncode, stdout, stderr = await self.host_service.run_remote_command(source_host_info, zfs_create_cmd)
+                if returncode != 0:
+                    logger.warning(f"Failed to convert {volume.source} to dataset, skipping...")
+                    continue
+            
+            # Create snapshot for volume
+            dataset_name = volume.source.replace('/mnt/', '')
+            snapshot_name = f"{dataset_name}@migration_{timestamp}"
+            zfs_snapshot_cmd = f"zfs snapshot {SecurityUtils.escape_shell_argument(snapshot_name)}"
+            returncode, stdout, stderr = await self.host_service.run_remote_command(source_host_info, zfs_snapshot_cmd)
+            
+            if returncode != 0:
+                logger.warning(f"Failed to create snapshot for {volume.source}: {stderr}")
+                continue
+                
+            snapshots.append((snapshot_name, volume.source))
+            volume.is_dataset = True
+            volume.dataset_path = dataset_name
+        
+        return snapshots

@@ -9,10 +9,25 @@ TransDock is a powerful tool for migrating Docker Compose stacks between machine
 - **Intelligent Transfer**: Automatically chooses between ZFS send/receive or rsync
 - **Volume Management**: Automatically detects and converts directories to ZFS datasets
 - **Path Translation**: Updates Docker Compose files with new paths on target machine
-- **Migration Verification**: Verifies successful container deployment and health checks
+- **Migration Verification**: Verifies successful container deployment with smart container name detection
+- **Security Validation**: Comprehensive input validation and sanitization to prevent attacks
 - **RESTful API**: Fully featured FastAPI backend ready for frontend integration
 - **Progress Tracking**: Real-time migration progress and status updates
 - **Error Recovery**: Comprehensive error handling with rollback capabilities
+- **Migration Control**: Cancel running migrations with cleanup operations
+
+## 🔐 Security Features
+
+TransDock includes enterprise-grade security validation to protect against common attack vectors:
+
+- **Path Traversal Prevention**: All file paths are sanitized and validated against directory traversal attacks
+- **Command Injection Protection**: User inputs are escaped and validated to prevent command injection
+- **SSH Security**: Hostnames and usernames validated with strict patterns to prevent SSH injection
+- **ZFS Command Validation**: All ZFS operations validated against allowed commands and parameters
+- **Input Sanitization**: Comprehensive validation of all API inputs for format, length, and content
+- **Smart Container Detection**: Secure container name resolution prevents injection through compose service names
+
+Security validation failures return detailed error messages with `422 Unprocessable Entity` status codes.
 
 ## 🏗️ Project Structure
 

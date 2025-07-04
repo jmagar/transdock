@@ -1,8 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import logging
-from .models import MigrationRequest, MigrationResponse
+from .models import (
+    MigrationRequest, MigrationResponse, HostValidationRequest, 
+    HostInfo, HostCapabilities, RemoteStack, StackAnalysis
+)
 from .migration_service import MigrationService
+from .host_service import HostService
 from .security_utils import SecurityUtils, SecurityValidationError
 from datetime import datetime, timezone
 
@@ -26,8 +30,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize migration service
+# Initialize services
 migration_service = MigrationService()
+host_service = HostService()
 
 
 @app.get("/")
@@ -250,6 +255,185 @@ async def cleanup_migration(migration_id: str):
             detail="Migration not found") from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# Multi-Host Stack Management Endpoints
+
+@app.post("/api/hosts/validate", response_model=HostCapabilities)
+async def validate_host(request: HostValidationRequest):
+    """Validate and check capabilities of a remote host"""
+    try:
+        host_info = HostInfo(
+            hostname=request.hostname,
+            ssh_user=request.ssh_user,
+            ssh_port=request.ssh_port
+        )
+        
+        capabilities = await host_service.check_host_capabilities(host_info)
+        return capabilities
+    except SecurityValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Security validation failed: {str(e)}") from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/api/hosts/{hostname}/capabilities")
+async def get_host_capabilities(hostname: str, ssh_user: str = "root", ssh_port: int = 22):
+    """Get capabilities of a specific host"""
+    try:
+        host_info = HostInfo(
+            hostname=hostname,
+            ssh_user=ssh_user,
+            ssh_port=ssh_port
+        )
+        
+        capabilities = await host_service.check_host_capabilities(host_info)
+        return capabilities
+    except SecurityValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Security validation failed: {str(e)}") from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/api/hosts/{hostname}/compose/stacks")
+async def list_remote_stacks(hostname: str, compose_path: str, ssh_user: str = "root", ssh_port: int = 22):
+    """List compose stacks on a remote host"""
+    try:
+        host_info = HostInfo(
+            hostname=hostname,
+            ssh_user=ssh_user,
+            ssh_port=ssh_port
+        )
+        
+        stacks = await host_service.list_remote_stacks(host_info, compose_path)
+        return {"stacks": stacks}
+    except SecurityValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Security validation failed: {str(e)}") from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/api/hosts/{hostname}/compose/stacks/{stack_name}", response_model=StackAnalysis)
+async def analyze_remote_stack(hostname: str, stack_name: str, compose_path: str, ssh_user: str = "root", ssh_port: int = 22):
+    """Analyze a specific stack on a remote host"""
+    try:
+        host_info = HostInfo(
+            hostname=hostname,
+            ssh_user=ssh_user,
+            ssh_port=ssh_port
+        )
+        
+        # Construct stack path
+        stack_path = f"{compose_path.rstrip('/')}/{stack_name}"
+        
+        analysis = await host_service.analyze_remote_stack(host_info, stack_path)
+        return analysis
+    except SecurityValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Security validation failed: {str(e)}") from e
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/api/hosts/{hostname}/compose/stacks/{stack_name}/start")
+async def start_remote_stack(hostname: str, stack_name: str, compose_path: str, ssh_user: str = "root", ssh_port: int = 22):
+    """Start a stack on a remote host"""
+    try:
+        host_info = HostInfo(
+            hostname=hostname,
+            ssh_user=ssh_user,
+            ssh_port=ssh_port
+        )
+        
+        # Construct stack path
+        stack_path = f"{compose_path.rstrip('/')}/{stack_name}"
+        
+        success = await host_service.start_remote_stack(host_info, stack_path)
+        if success:
+            return {"success": True, "message": f"Stack {stack_name} started successfully"}
+        else:
+            raise HTTPException(status_code=400, detail=f"Failed to start stack {stack_name}")
+    except SecurityValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Security validation failed: {str(e)}") from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/api/hosts/{hostname}/compose/stacks/{stack_name}/stop")
+async def stop_remote_stack(hostname: str, stack_name: str, compose_path: str, ssh_user: str = "root", ssh_port: int = 22):
+    """Stop a stack on a remote host"""
+    try:
+        host_info = HostInfo(
+            hostname=hostname,
+            ssh_user=ssh_user,
+            ssh_port=ssh_port
+        )
+        
+        # Construct stack path
+        stack_path = f"{compose_path.rstrip('/')}/{stack_name}"
+        
+        success = await host_service.stop_remote_stack(host_info, stack_path)
+        if success:
+            return {"success": True, "message": f"Stack {stack_name} stopped successfully"}
+        else:
+            raise HTTPException(status_code=400, detail=f"Failed to stop stack {stack_name}")
+    except SecurityValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Security validation failed: {str(e)}") from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/api/hosts/{hostname}/datasets")
+async def list_remote_datasets(hostname: str, ssh_user: str = "root", ssh_port: int = 22):
+    """List ZFS datasets on a remote host"""
+    try:
+        host_info = HostInfo(
+            hostname=hostname,
+            ssh_user=ssh_user,
+            ssh_port=ssh_port
+        )
+        
+        # List datasets on remote host
+        zfs_cmd = "zfs list -H -o name,mountpoint -t filesystem"
+        returncode, stdout, stderr = await host_service.run_remote_command(host_info, zfs_cmd)
+        
+        if returncode != 0:
+            if "command not found" in stderr or "No such file" in stderr:
+                return {"datasets": [], "error": "ZFS not available on remote host"}
+            else:
+                raise HTTPException(status_code=500, detail=f"Failed to list datasets: {stderr}")
+        
+        datasets = []
+        for line in stdout.strip().split('\n'):
+            if line.strip():
+                parts = line.split('\t')
+                if len(parts) >= 2:
+                    datasets.append({
+                        "name": parts[0],
+                        "mountpoint": parts[1]
+                    })
+        
+        return {"datasets": datasets}
+    except SecurityValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Security validation failed: {str(e)}") from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
 
 if __name__ == "__main__":
     import uvicorn
