@@ -10,8 +10,8 @@ logger = logging.getLogger(__name__)
 
 class DockerOperations:
     def __init__(self):
-        self.compose_base_path = "/mnt/cache/compose"
-        self.appdata_base_path = "/mnt/cache/appdata"
+        self.compose_base_path = os.getenv("TRANSDOCK_COMPOSE_BASE", "/mnt/cache/compose")
+        self.appdata_base_path = os.getenv("TRANSDOCK_APPDATA_BASE", "/mnt/cache/appdata")
     
     async def run_command(self, cmd: List[str], cwd: Optional[str] = None) -> Tuple[int, str, str]:
         """Run a command asynchronously"""
@@ -119,12 +119,32 @@ class DockerOperations:
         
         return unique_mounts
     
+    async def is_compose_stack_running(self, compose_dir: str) -> bool:
+        """Check if a docker compose stack is running"""
+        compose_file = await self.find_compose_file(compose_dir)
+        if not compose_file:
+            return False
+        
+        cmd = ["docker-compose", "-f", compose_file, "ps", "-q"]
+        returncode, stdout, stderr = await self.run_command(cmd, cwd=compose_dir)
+        
+        if returncode != 0:
+            return False
+        
+        # If there are any running containers, stdout will have container IDs
+        return bool(stdout.strip())
+    
     async def stop_compose_stack(self, compose_dir: str) -> bool:
         """Stop a docker compose stack"""
         compose_file = await self.find_compose_file(compose_dir)
         if not compose_file:
             logger.error(f"No compose file found in {compose_dir}")
             return False
+        
+        # Check if stack is already stopped
+        if not await self.is_compose_stack_running(compose_dir):
+            logger.info(f"Compose stack in {compose_dir} is already stopped")
+            return True
         
         logger.info(f"Stopping compose stack in {compose_dir}")
         
@@ -155,6 +175,38 @@ class DockerOperations:
             return False
         
         logger.info(f"Successfully started compose stack in {compose_dir}")
+        return True
+    
+    async def start_compose_stack_remote(self, target_host: str, compose_dir: str, 
+                                       ssh_user: str = "root", ssh_port: int = 22) -> bool:
+        """Start a docker compose stack on remote host"""
+        logger.info(f"Starting compose stack in {compose_dir} on {target_host}")
+        
+        # Find compose file remotely
+        find_cmd = [
+            "ssh", "-p", str(ssh_port), f"{ssh_user}@{target_host}",
+            f"find {compose_dir} -name 'docker-compose.yml' -o -name 'docker-compose.yaml' -o -name 'compose.yml' -o -name 'compose.yaml' | head -1"
+        ]
+        
+        returncode, stdout, stderr = await self.run_command(find_cmd)
+        if returncode != 0 or not stdout.strip():
+            logger.error(f"No compose file found in {compose_dir} on {target_host}")
+            return False
+        
+        compose_file = stdout.strip()
+        
+        # Start the stack remotely
+        start_cmd = [
+            "ssh", "-p", str(ssh_port), f"{ssh_user}@{target_host}",
+            f"cd {compose_dir} && docker-compose -f {compose_file} up -d"
+        ]
+        
+        returncode, stdout, stderr = await self.run_command(start_cmd)
+        if returncode != 0:
+            logger.error(f"Failed to start compose stack on {target_host}: {stderr}")
+            return False
+        
+        logger.info(f"Successfully started compose stack in {compose_dir} on {target_host}")
         return True
     
     async def update_compose_file_paths(self, compose_file_path: str, volume_mapping: Dict[str, str]) -> bool:

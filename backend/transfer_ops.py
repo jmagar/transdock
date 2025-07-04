@@ -84,16 +84,19 @@ class TransferOperations:
             logger.error(f"Security validation failed: {e}")
             return False
         
-        # Create parent dataset on target if it doesn't exist
-        parent_dataset = "/".join(target_dataset.split("/")[:-1])
-        if parent_dataset:
-            try:
-                zfs_create_cmd = SecurityUtils.validate_zfs_command_args("create", "-p", parent_dataset)
-                create_cmd_str = f"{' '.join(zfs_create_cmd)} 2>/dev/null || true"
-                create_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, create_cmd_str)
-                await self.run_command(create_cmd)
-            except SecurityValidationError as e:
-                logger.warning(f"Failed to validate parent dataset creation command: {e}")
+        # Create target dataset on remote system if it doesn't exist
+        try:
+            # First create parent datasets with -p flag
+            zfs_create_cmd = SecurityUtils.validate_zfs_command_args("create", "-p", target_dataset)
+            create_cmd_str = " ".join(zfs_create_cmd)
+            create_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, create_cmd_str)
+            
+            returncode, stdout, stderr = await self.run_command(create_cmd)
+            if returncode != 0 and "dataset already exists" not in stderr:
+                logger.warning(f"Failed to create target dataset {target_dataset}: {stderr}")
+                # Continue anyway - maybe the dataset will be created by the receive command
+        except SecurityValidationError as e:
+            logger.warning(f"Failed to validate dataset creation command: {e}")
         
         # Send the snapshot using secure command construction
         try:

@@ -173,9 +173,74 @@ class ZFSOperations:
             logger.error(f"Security validation failed: {e}")
             return False
         
+        # Handle target dataset - check if exists and prepare for overwrite
+        dataset_exists = False
+        dataset_mount_path = None
+        
+        try:
+            logger.info(f"Checking if target dataset {target_dataset} exists on {target_host}")
+            
+            # Check if target dataset exists
+            check_cmd = SecurityUtils.validate_zfs_command_args("list", "-H", target_dataset)
+            check_cmd_str = " ".join(check_cmd)
+            check_ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, check_cmd_str)
+            
+            returncode, stdout, stderr = await self.run_command(check_ssh_cmd)
+            if returncode == 0:
+                dataset_exists = True
+                # Extract mount path from ZFS list output
+                if stdout.strip():
+                    # ZFS list output format: name mountpoint
+                    parts = stdout.strip().split('\t')
+                    if len(parts) >= 2 and parts[1] != '-':
+                        dataset_mount_path = parts[1]
+                    else:
+                        # Fallback: construct mount path
+                        dataset_mount_path = f"/mnt/{target_dataset}"
+                else:
+                    # Fallback: construct mount path
+                    dataset_mount_path = f"/mnt/{target_dataset}"
+                
+                logger.info(f"Target dataset {target_dataset} exists at {dataset_mount_path}")
+                
+                # Try to force unmount the dataset if it's busy
+                logger.info(f"Attempting to force unmount {dataset_mount_path} to prevent busy errors")
+                unmount_success = await self.force_unmount_dataset(
+                    target_host, dataset_mount_path, ssh_user, ssh_port
+                )
+                if unmount_success:
+                    logger.info(f"Successfully prepared {target_dataset} for overwrite")
+                else:
+                    logger.warning(f"Could not force unmount {dataset_mount_path}, will try -F flag anyway")
+            else:
+                logger.info(f"Target dataset {target_dataset} does not exist")
+                
+            # Ensure parent datasets exist
+            parent_dataset = "/".join(target_dataset.split("/")[:-1])
+            if parent_dataset:
+                logger.info(f"Ensuring parent dataset {parent_dataset} exists on {target_host}")
+                parent_create_cmd = SecurityUtils.validate_zfs_command_args("create", "-p", parent_dataset)
+                parent_create_cmd_str = " ".join(parent_create_cmd)
+                parent_ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, parent_create_cmd_str)
+                
+                parent_returncode, parent_stdout, parent_stderr = await self.run_command(parent_ssh_cmd)
+                if parent_returncode != 0:
+                    logger.warning(f"Failed to create parent dataset {parent_dataset}: {parent_stderr}")
+                    # Continue anyway
+                    
+        except SecurityValidationError as e:
+            logger.warning(f"Failed to validate target dataset management commands: {e}")
+            # Continue anyway
+        
         # Build secure command with proper escaping
         zfs_send_cmd = SecurityUtils.validate_zfs_command_args("send", snapshot_name)
-        zfs_receive_cmd = SecurityUtils.validate_zfs_command_args("receive", target_dataset)
+        
+        # Use -F flag to overwrite existing dataset if it exists
+        if dataset_exists:
+            zfs_receive_cmd = SecurityUtils.validate_zfs_command_args("receive", "-F", target_dataset)
+            logger.info(f"Using -F flag to overwrite existing dataset {target_dataset}")
+        else:
+            zfs_receive_cmd = SecurityUtils.validate_zfs_command_args("receive", target_dataset)
         
         # Create secure ssh command for the receive part
         receive_cmd_str = " ".join(zfs_receive_cmd)
@@ -245,3 +310,113 @@ class ZFSOperations:
         """Check if ZFS is available on the system"""
         returncode, _, _ = await self.run_command(["which", "zfs"])
         return returncode == 0
+    
+    async def safe_run_system_command(self, *args: str) -> tuple[int, str, str]:
+        """
+        Safely validate and execute a system command with security validation.
+        
+        Args:
+            *args: System command arguments to validate and execute
+            
+        Returns:
+            tuple: (returncode, stdout, stderr) - same as run_command()
+                   Returns (1, "", "Security validation failed") on validation error
+        """
+        try:
+            if not args:
+                raise SecurityValidationError("No system command provided")
+            
+            # First argument is the command, rest are arguments
+            command = args[0]
+            command_args = args[1:] if len(args) > 1 else []
+            
+            cmd = SecurityUtils.validate_system_command_args(command, *command_args)
+            return await self.run_command(cmd)
+        except SecurityValidationError:
+            return 1, "", "Security validation failed"
+    
+    async def force_unmount_dataset(self, target_host: str, dataset_path: str, 
+                                   ssh_user: str = "root", ssh_port: int = 22) -> bool:
+        """
+        Forcefully unmount a busy dataset on remote host by killing processes using it.
+        
+        Args:
+            target_host: Remote host hostname
+            dataset_path: Path to the dataset mount point (e.g., /mnt/backup/compose/simple-web)
+            ssh_user: SSH username
+            ssh_port: SSH port
+            
+        Returns:
+            bool: True if successfully unmounted, False otherwise
+        """
+        try:
+            # Validate inputs
+            SecurityUtils.validate_hostname(target_host)
+            SecurityUtils.validate_username(ssh_user)
+            SecurityUtils.validate_port(ssh_port)
+            dataset_path = SecurityUtils.sanitize_path(dataset_path, allow_absolute=True)
+            
+            logger.info(f"Attempting to force unmount {dataset_path} on {target_host}")
+            
+            # Step 1: Check if the path is actually mounted
+            mountpoint_cmd = SecurityUtils.validate_system_command_args("mountpoint", dataset_path)
+            mountpoint_cmd_str = " ".join(mountpoint_cmd)
+            ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, mountpoint_cmd_str)
+            
+            returncode, stdout, stderr = await self.run_command(ssh_cmd)
+            if returncode != 0:
+                logger.info(f"Path {dataset_path} is not mounted on {target_host}")
+                return True  # Not mounted, so unmount "succeeded"
+            
+            # Step 2: Try to find processes using the dataset
+            logger.info(f"Finding processes using {dataset_path} on {target_host}")
+            fuser_cmd = SecurityUtils.validate_system_command_args("fuser", "-mv", dataset_path)
+            fuser_cmd_str = " ".join(fuser_cmd)
+            ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, fuser_cmd_str)
+            
+            returncode, stdout, stderr = await self.run_command(ssh_cmd)
+            if returncode == 0 and stdout.strip():
+                logger.warning(f"Found processes using {dataset_path}: {stdout.strip()}")
+                
+                # Step 3: Kill processes using the dataset (SIGTERM first)
+                logger.info(f"Attempting to kill processes using {dataset_path} with SIGTERM")
+                fuser_kill_cmd = SecurityUtils.validate_system_command_args("fuser", "-km", dataset_path)
+                fuser_kill_cmd_str = " ".join(fuser_kill_cmd)
+                ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, fuser_kill_cmd_str)
+                
+                await self.run_command(ssh_cmd)
+                
+                # Wait a moment for processes to exit
+                await asyncio.sleep(2)
+                
+                # Step 4: If still busy, use SIGKILL
+                logger.info(f"Attempting to kill processes using {dataset_path} with SIGKILL")
+                fuser_kill9_cmd = SecurityUtils.validate_system_command_args("fuser", "-9km", dataset_path)
+                fuser_kill9_cmd_str = " ".join(fuser_kill9_cmd)
+                ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, fuser_kill9_cmd_str)
+                
+                await self.run_command(ssh_cmd)
+                
+                # Wait for cleanup
+                await asyncio.sleep(1)
+            
+            # Step 5: Try to unmount forcefully
+            logger.info(f"Attempting to unmount {dataset_path} on {target_host}")
+            umount_cmd = SecurityUtils.validate_system_command_args("umount", "-f", dataset_path)
+            umount_cmd_str = " ".join(umount_cmd)
+            ssh_cmd = SecurityUtils.build_ssh_command(target_host, ssh_user, ssh_port, umount_cmd_str)
+            
+            returncode, stdout, stderr = await self.run_command(ssh_cmd)
+            if returncode == 0:
+                logger.info(f"Successfully unmounted {dataset_path} on {target_host}")
+                return True
+            else:
+                logger.warning(f"Failed to unmount {dataset_path} on {target_host}: {stderr}")
+                return False
+                
+        except SecurityValidationError as e:
+            logger.error(f"Security validation failed for force unmount: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Error during force unmount of {dataset_path}: {e}")
+            return False

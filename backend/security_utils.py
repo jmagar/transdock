@@ -216,6 +216,33 @@ class SecurityUtils:
         return validated_args
     
     @staticmethod
+    def validate_system_command_args(command: str, *args) -> List[str]:
+        """Validate and build system command arguments safely for dataset management."""
+        # Only allow specific system commands needed for dataset management
+        allowed_commands = ['umount', 'fuser', 'lsof', 'kill', 'mountpoint']
+        
+        if command not in allowed_commands:
+            raise SecurityValidationError(f"Invalid system command: {command}")
+        
+        validated_args = [command]
+        
+        for arg in args:
+            if isinstance(arg, str):
+                # Basic validation for system command arguments
+                if len(arg) > 512:  # Reasonable limit
+                    raise SecurityValidationError(f"System command argument too long: {arg[:50]}...")
+                
+                # Check for command injection attempts
+                if any(char in arg for char in ['&', '|', ';', '`', '$', '(', ')', '\n', '\r']):
+                    raise SecurityValidationError(f"System command argument contains invalid characters: {arg}")
+                    
+                validated_args.append(SecurityUtils.escape_shell_argument(arg))
+            else:
+                validated_args.append(str(arg))
+        
+        return validated_args
+    
+    @staticmethod
     def create_secure_mount_point(base_path: str, identifier: str) -> str:
         """Create a secure mount point path."""
         # Sanitize identifier

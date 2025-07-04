@@ -200,7 +200,11 @@ class MigrationService:
                 # Execute transfer based on method
                 if transfer_method == TransferMethod.ZFS_SEND:
                     dataset_name = await self.zfs_ops.get_dataset_name(source_path)
-                    target_dataset = target_path.replace(f"{request.target_base_path}/", "").replace("/", "_")
+                    # Convert target path to proper ZFS dataset name (keep slashes)
+                    if target_path.startswith("/mnt/"):
+                        target_dataset = target_path[5:]  # Remove /mnt/ prefix
+                    else:
+                        target_dataset = target_path.replace(f"{request.target_base_path}/", "")
                     
                     success = await self.zfs_ops.send_snapshot(
                         snapshot_name, request.target_host, target_dataset,
@@ -236,12 +240,23 @@ class MigrationService:
                 raise Exception("Failed to save updated compose file")
             
             # Step 11: Clean up snapshots
-            await self._update_status(migration_id, "cleaning", 98, "Cleaning up snapshots")
+            await self._update_status(migration_id, "cleaning", 97, "Cleaning up snapshots")
             
             for snapshot_name, _ in snapshots:
                 await self.zfs_ops.cleanup_snapshot(snapshot_name)
             
-            # Step 12: Complete migration
+            # Step 12: Start the stack on target system
+            await self._update_status(migration_id, "starting", 99, "Starting stack on target system")
+            
+            stack_started = await self.docker_ops.start_compose_stack_remote(
+                request.target_host, compose_target_path, request.ssh_user, request.ssh_port
+            )
+            
+            if not stack_started:
+                logger.warning(f"Failed to start stack on target system for migration {migration_id}")
+                # Don't fail the migration, just log warning
+            
+            # Step 13: Complete migration
             await self._update_status(migration_id, "completed", 100, "Migration completed successfully")
             
             # Store final configuration
@@ -342,7 +357,7 @@ class MigrationService:
         # Add configuration paths
         info["compose_base"] = self.docker_ops.compose_base_path
         info["appdata_base"] = self.docker_ops.appdata_base_path
-        info["zfs_pool"] = "cache"  # Default ZFS pool name for Unraid
+        info["zfs_pool"] = os.getenv("TRANSDOCK_ZFS_POOL", "cache")  # Default ZFS pool name for Unraid
         
         return info
 
