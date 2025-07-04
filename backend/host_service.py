@@ -4,7 +4,7 @@ import yaml
 import json
 import asyncio
 from typing import List, Dict, Optional, Tuple
-from .models import HostInfo, HostCapabilities, RemoteStack, StackAnalysis, VolumeMount
+from .models import HostInfo, HostCapabilities, RemoteStack, StackAnalysis, VolumeMount, StorageInfo, StorageValidationResult, MigrationStorageRequirement
 from .security_utils import SecurityUtils, SecurityValidationError
 from .docker_ops import DockerOperations
 
@@ -101,6 +101,14 @@ class HostService:
             
             # Discover appdata paths
             capabilities.appdata_paths = await self._discover_paths(host_info, self.common_appdata_paths)
+            
+            # Get storage information for discovered paths
+            all_paths = list(set(capabilities.compose_paths + capabilities.appdata_paths))
+            if not all_paths:
+                # Add some common paths if none were discovered
+                all_paths = ["/mnt/cache", "/mnt/user", "/opt", "/home"]
+            
+            capabilities.storage_info = await self.get_storage_info(host_info, all_paths)
             
         except Exception as e:
             logger.error(f"Failed to check host capabilities: {e}")
@@ -285,6 +293,11 @@ class HostService:
             # Estimate size (if possible)
             estimated_size = await self._estimate_stack_size(host_info, volumes)
             
+            # Calculate storage requirement
+            storage_requirement = await self.estimate_migration_storage_requirement(
+                host_info, volumes, include_zfs_overhead=zfs_compatible
+            )
+            
             return StackAnalysis(
                 name=os.path.basename(stack_path),
                 path=stack_path,
@@ -294,7 +307,8 @@ class HostService:
                 networks=networks,
                 external_volumes=external_volumes,
                 zfs_compatible=zfs_compatible,
-                estimated_size=estimated_size
+                estimated_size=estimated_size,
+                storage_requirement=storage_requirement
             )
         
         except Exception as e:
@@ -393,4 +407,229 @@ class HostService:
         
         except Exception as e:
             logger.error(f"Failed to stop remote stack: {e}")
-            return False 
+            return False
+    
+    async def get_storage_info(self, host_info: HostInfo, paths: List[str]) -> List[StorageInfo]:
+        """Get storage information for specified paths on a remote host"""
+        storage_info = []
+        
+        for path in paths:
+            try:
+                # Validate and sanitize path
+                safe_path = SecurityUtils.sanitize_path(path, allow_absolute=True)
+                
+                # Get filesystem information using df
+                df_cmd = f"df -B1 {SecurityUtils.escape_shell_argument(safe_path)} 2>/dev/null || echo 'error'"
+                returncode, stdout, stderr = await self.run_remote_command(host_info, df_cmd)
+                
+                if returncode == 0 and 'error' not in stdout:
+                    lines = stdout.strip().split('\n')
+                    if len(lines) >= 2:
+                        # Parse df output (filesystem, total, used, available, use%, mount)
+                        fields = lines[1].split()
+                        if len(fields) >= 6:
+                            filesystem = fields[0]
+                            total_bytes = int(fields[1])
+                            used_bytes = int(fields[2])
+                            available_bytes = int(fields[3])
+                            mount_point = fields[5] if len(fields) > 5 else safe_path
+                            
+                            storage_info.append(StorageInfo(
+                                path=safe_path,
+                                total_bytes=total_bytes,
+                                used_bytes=used_bytes,
+                                available_bytes=available_bytes,
+                                filesystem=filesystem,
+                                mount_point=mount_point
+                            ))
+                            
+                            from .utils import format_bytes
+                            logger.info(f"Storage info for {safe_path}: {format_bytes(available_bytes)} available")
+                
+            except Exception as e:
+                logger.error(f"Failed to get storage info for {path}: {e}")
+                continue
+        
+        return storage_info
+    
+    async def check_storage_availability(self, host_info: HostInfo, target_path: str, required_bytes: int) -> StorageValidationResult:
+        """Check if target path has enough storage space for migration"""
+        try:
+            # Validate inputs
+            safe_path = SecurityUtils.sanitize_path(target_path, allow_absolute=True)
+            
+            if required_bytes < 0:
+                return StorageValidationResult(
+                    is_valid=False,
+                    required_bytes=required_bytes,
+                    available_bytes=0,
+                    storage_path=safe_path,
+                    error_message="Required bytes cannot be negative"
+                )
+            
+            # Get storage info for target path
+            storage_info_list = await self.get_storage_info(host_info, [safe_path])
+            
+            if not storage_info_list:
+                return StorageValidationResult(
+                    is_valid=False,
+                    required_bytes=required_bytes,
+                    available_bytes=0,
+                    storage_path=safe_path,
+                    error_message=f"Unable to get storage information for {safe_path}"
+                )
+            
+            storage_info = storage_info_list[0]
+            available_bytes = storage_info.available_bytes
+            
+            # Calculate safety margin (20% extra space)
+            safety_margin_bytes = int(required_bytes * 0.2)
+            total_required = required_bytes + safety_margin_bytes
+            
+            is_valid = available_bytes >= total_required
+            
+            result = StorageValidationResult(
+                is_valid=is_valid,
+                required_bytes=required_bytes,
+                available_bytes=available_bytes,
+                storage_path=safe_path,
+                safety_margin_bytes=safety_margin_bytes
+            )
+            
+            if not is_valid:
+                from .utils import format_bytes
+                shortage = total_required - available_bytes
+                result.error_message = f"Insufficient storage space. Need {format_bytes(total_required)} ({format_bytes(required_bytes)} + {format_bytes(safety_margin_bytes)} safety margin), but only {format_bytes(available_bytes)} available. Shortage: {format_bytes(shortage)}"
+            elif available_bytes < required_bytes * 1.5:
+                # Warning if less than 50% extra space
+                from .utils import format_bytes
+                result.warning_message = f"Low storage space warning. Only {format_bytes(available_bytes)} available for {format_bytes(required_bytes)} required"
+            
+            from .utils import format_bytes
+            logger.info(f"Storage validation for {safe_path}: {'✅ PASS' if is_valid else '❌ FAIL'} - {format_bytes(available_bytes)} available, {format_bytes(total_required)} required")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to check storage availability: {e}")
+            return StorageValidationResult(
+                is_valid=False,
+                required_bytes=required_bytes,
+                available_bytes=0,
+                storage_path=target_path,
+                error_message=f"Storage validation failed: {e}"
+            )
+    
+    async def estimate_migration_storage_requirement(self, host_info: HostInfo, volumes: List[VolumeMount], 
+                                                    include_zfs_overhead: bool = True) -> MigrationStorageRequirement:
+        """Estimate storage requirements for a migration"""
+        try:
+            # Calculate total source size
+            source_size_bytes = 0
+            
+            for volume in volumes:
+                if os.path.isabs(volume.source):
+                    # Get directory size using du
+                    du_cmd = f"du -sb {SecurityUtils.escape_shell_argument(volume.source)} 2>/dev/null || echo '0 {volume.source}'"
+                    returncode, stdout, stderr = await self.run_remote_command(host_info, du_cmd)
+                    
+                    if returncode == 0:
+                        try:
+                            size_str = stdout.split()[0]
+                            size = int(size_str)
+                            source_size_bytes += size
+                            from .utils import format_bytes
+                            logger.info(f"Volume {volume.source}: {format_bytes(size)}")
+                        except (ValueError, IndexError):
+                            logger.warning(f"Could not parse size for {volume.source}")
+                            continue
+            
+            # Estimate transfer size (same as source for full copy)
+            estimated_transfer_size_bytes = source_size_bytes
+            
+            # Calculate ZFS snapshot overhead if applicable
+            zfs_snapshot_overhead_bytes = 0
+            if include_zfs_overhead:
+                # ZFS snapshots typically add 10-20% overhead for metadata
+                zfs_snapshot_overhead_bytes = int(source_size_bytes * 0.15)
+            
+            # Use the first volume's target path as base (will be adjusted by caller)
+            target_path = volumes[0].target if volumes else "/tmp"
+            
+            requirement = MigrationStorageRequirement(
+                source_size_bytes=source_size_bytes,
+                target_path=target_path,
+                estimated_transfer_size_bytes=estimated_transfer_size_bytes,
+                zfs_snapshot_overhead_bytes=zfs_snapshot_overhead_bytes
+            )
+            
+            total_required = (estimated_transfer_size_bytes + 
+                            zfs_snapshot_overhead_bytes)
+            
+            from .utils import format_bytes
+            logger.info(f"Migration storage requirement: {format_bytes(total_required)} total "
+                       f"({format_bytes(source_size_bytes)} source + {format_bytes(zfs_snapshot_overhead_bytes)} ZFS overhead)")
+            
+            return requirement
+            
+        except Exception as e:
+            logger.error(f"Failed to estimate migration storage requirement: {e}")
+            return MigrationStorageRequirement(
+                source_size_bytes=0,
+                target_path="/tmp",
+                estimated_transfer_size_bytes=0,
+                zfs_snapshot_overhead_bytes=0
+            )
+    
+    async def validate_migration_storage(self, source_host_info: HostInfo, target_host_info: HostInfo,
+                                        volumes: List[VolumeMount], target_base_path: str,
+                                        use_zfs: bool = False) -> Dict[str, StorageValidationResult]:
+        """Validate storage requirements for a complete migration"""
+        results = {}
+        
+        try:
+            # Get storage requirements
+            storage_requirement = await self.estimate_migration_storage_requirement(
+                source_host_info, volumes, include_zfs_overhead=use_zfs
+            )
+            
+            # Check target storage
+            total_required_bytes = (storage_requirement.estimated_transfer_size_bytes + 
+                                  storage_requirement.zfs_snapshot_overhead_bytes)
+            
+            target_validation = await self.check_storage_availability(
+                target_host_info, target_base_path, total_required_bytes
+            )
+            
+            results["target"] = target_validation
+            
+            # Check source storage for ZFS snapshots if needed
+            if use_zfs and storage_requirement.zfs_snapshot_overhead_bytes > 0:
+                # Find source base path (use first volume's source path)
+                source_path = "/"
+                if volumes:
+                    source_path = os.path.dirname(volumes[0].source)
+                
+                source_validation = await self.check_storage_availability(
+                    source_host_info, source_path, storage_requirement.zfs_snapshot_overhead_bytes
+                )
+                
+                results["source"] = source_validation
+            
+            # Log overall validation result
+            overall_valid = all(result.is_valid for result in results.values())
+            logger.info(f"Migration storage validation: {'✅ PASS' if overall_valid else '❌ FAIL'}")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Failed to validate migration storage: {e}")
+            return {
+                "error": StorageValidationResult(
+                    is_valid=False,
+                    required_bytes=0,
+                    available_bytes=0,
+                    storage_path=target_base_path,
+                    error_message=f"Storage validation failed: {e}"
+                )
+            }

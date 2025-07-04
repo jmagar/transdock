@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 from .models import (
     MigrationRequest, MigrationResponse, HostValidationRequest, 
-    HostInfo, HostCapabilities, RemoteStack, StackAnalysis
+    HostInfo, HostCapabilities, RemoteStack, StackAnalysis, 
+    StorageValidationResult, MigrationStorageRequirement
 )
 from .migration_service import MigrationService
 from .host_service import HostService
@@ -69,7 +70,18 @@ async def create_migration(request: MigrationRequest):
             status_code=422,
             detail=f"Security validation failed: {str(e)}") from e
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        error_message = str(e)
+        # Provide more specific error handling for storage validation failures
+        if "Storage validation failed" in error_message:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Storage validation failed - {error_message}. Please ensure target system has sufficient disk space.")
+        elif "Insufficient storage space" in error_message:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Insufficient storage space - {error_message}. Free up disk space or choose a different target path.")
+        else:
+            raise HTTPException(status_code=400, detail=error_message) from e
 
 
 @app.get("/api/migrations")
@@ -431,6 +443,62 @@ async def list_remote_datasets(hostname: str, ssh_user: str = "root", ssh_port: 
         raise HTTPException(
             status_code=422,
             detail=f"Security validation failed: {str(e)}") from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/api/hosts/{hostname}/storage")
+async def get_host_storage_info(hostname: str, ssh_user: str = "root", ssh_port: int = 22):
+    """Get storage information for a remote host"""
+    try:
+        # Security validation
+        SecurityUtils.validate_hostname(hostname)
+        SecurityUtils.validate_username(ssh_user)
+        SecurityUtils.validate_port(ssh_port)
+        
+        host_info = HostInfo(hostname=hostname, ssh_user=ssh_user, ssh_port=ssh_port)
+        
+        # Get storage info for common paths
+        common_paths = ["/mnt/cache", "/mnt/user", "/opt", "/home", "/var/lib/docker"]
+        storage_info = await host_service.get_storage_info(host_info, common_paths)
+        
+        return {"storage": storage_info}
+        
+    except SecurityValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}") from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/api/hosts/{hostname}/storage/validate")
+async def validate_host_storage(hostname: str, target_path: str, required_bytes: int, ssh_user: str = "root", ssh_port: int = 22):
+    """Validate storage capacity on a remote host"""
+    try:
+        # Security validation
+        SecurityUtils.validate_hostname(hostname)
+        SecurityUtils.validate_username(ssh_user)
+        SecurityUtils.validate_port(ssh_port)
+        
+        if required_bytes < 0:
+            raise HTTPException(status_code=400, detail="Required bytes must be non-negative")
+        
+        host_info = HostInfo(hostname=hostname, ssh_user=ssh_user, ssh_port=ssh_port)
+        
+        # Validate storage availability
+        validation_result = await host_service.check_storage_availability(host_info, target_path, required_bytes)
+        
+        if not validation_result.is_valid:
+            # Return detailed error information but still as successful HTTP response
+            # The client can check the is_valid field
+            return {
+                "validation": validation_result,
+                "recommendation": "Free up disk space or choose a different target path with more available space"
+            }
+        
+        return {"validation": validation_result}
+        
+    except SecurityValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}") from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 

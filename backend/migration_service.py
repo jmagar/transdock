@@ -6,7 +6,7 @@ import logging
 import yaml
 from datetime import datetime
 from typing import Dict, List, Any, Tuple
-from .models import MigrationRequest, MigrationStatus, TransferMethod, HostInfo
+from .models import MigrationRequest, MigrationStatus, TransferMethod, HostInfo, StorageValidationResult
 from .zfs_ops import ZFSOperations
 from .docker_ops import DockerOperations
 from .transfer_ops import TransferOperations
@@ -186,6 +186,59 @@ class MigrationService:
 
             logger.info(f"Found {len(volumes)} volume mounts for migration {migration_id}")
 
+            # Step 3.5: Validate storage requirements
+            await self._update_status(migration_id, "validating", 17, "Validating storage requirements")
+            
+            # Create target host info
+            target_host_info = HostInfo(
+                hostname=request.target_host,
+                ssh_user=request.ssh_user,
+                ssh_port=request.ssh_port
+            )
+            
+            # Estimate storage requirements and validate target capacity
+            if is_remote_source:
+                storage_validation = await self.host_service.validate_migration_storage(
+                    source_host_info, target_host_info, volumes, request.target_base_path, use_zfs=source_has_zfs
+                )
+            else:
+                # For local source, create a local host info
+                local_host_info = HostInfo(hostname="localhost", ssh_user="root", ssh_port=22)
+                storage_validation = await self.host_service.validate_migration_storage(
+                    local_host_info, target_host_info, volumes, request.target_base_path, use_zfs=source_has_zfs
+                )
+            
+            # Store storage validation results in migration status
+            self.active_migrations[migration_id].storage_validation_results = storage_validation
+            
+            # Get storage requirement for status
+            if is_remote_source:
+                storage_requirement = await self.host_service.estimate_migration_storage_requirement(
+                    source_host_info, volumes, include_zfs_overhead=source_has_zfs
+                )
+            else:
+                local_host_info = HostInfo(hostname="localhost", ssh_user="root", ssh_port=22)
+                storage_requirement = await self.host_service.estimate_migration_storage_requirement(
+                    local_host_info, volumes, include_zfs_overhead=source_has_zfs
+                )
+            
+            self.active_migrations[migration_id].estimated_storage_requirement = storage_requirement
+            
+            # Check validation results
+            failed_validations = {k: v for k, v in storage_validation.items() if not v.is_valid}
+            if failed_validations:
+                error_messages = []
+                for location, result in failed_validations.items():
+                    error_messages.append(f"{location}: {result.error_message}")
+                raise Exception(f"Storage validation failed: {'; '.join(error_messages)}")
+            
+            # Log warnings if any
+            for location, result in storage_validation.items():
+                if result.warning_message:
+                    logger.warning(f"Storage warning for {location}: {result.warning_message}")
+            
+            logger.info(f"Storage validation passed for migration {migration_id}")
+
             # Step 4: Stop the compose stack
             await self._update_status(migration_id, "stopping", 20, "Stopping Docker compose stack")
 
@@ -231,6 +284,23 @@ class MigrationService:
                 await self._update_status(migration_id, "preparing", 65, "Preparing ZFS send transfer")
 
             self.active_migrations[migration_id].transfer_method = transfer_method
+            
+            # Step 6.5: Final storage validation before transfer
+            await self._update_status(migration_id, "validating", 67, "Final storage validation before transfer")
+            
+            # Re-check target storage availability (space might have changed)
+            target_storage_check = await self.host_service.check_storage_availability(
+                target_host_info, request.target_base_path,
+                sum(result.required_bytes for result in storage_validation.values() if result.is_valid)
+            )
+            
+            if not target_storage_check.is_valid:
+                raise Exception(f"Target storage validation failed before transfer: {target_storage_check.error_message}")
+            
+            if target_storage_check.warning_message:
+                logger.warning(f"Target storage warning: {target_storage_check.warning_message}")
+            
+            logger.info(f"Final storage validation passed - ready for transfer")
 
             # Step 7: Create volume path mapping
             volume_mapping = await self.transfer_ops.create_volume_mapping(volumes, request.target_base_path)

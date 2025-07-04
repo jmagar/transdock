@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 from typing import List, Optional, Dict
 from enum import Enum
 
@@ -14,6 +14,107 @@ class HostInfo(BaseModel):
     ssh_port: int = Field(default=22)
 
 
+class StorageInfo(BaseModel):
+    path: str
+    total_bytes: int
+    used_bytes: int
+    available_bytes: int
+    filesystem: str
+    mount_point: str
+    
+    @computed_field
+    @property
+    def total_human(self) -> str:
+        from .utils import format_bytes
+        return format_bytes(self.total_bytes)
+    
+    @computed_field
+    @property
+    def used_human(self) -> str:
+        from .utils import format_bytes
+        return format_bytes(self.used_bytes)
+    
+    @computed_field
+    @property
+    def available_human(self) -> str:
+        from .utils import format_bytes
+        return format_bytes(self.available_bytes)
+    
+    @computed_field
+    @property
+    def usage_percent(self) -> float:
+        if self.total_bytes == 0:
+            return 0.0
+        return (self.used_bytes / self.total_bytes) * 100
+
+
+class StorageValidationResult(BaseModel):
+    is_valid: bool
+    required_bytes: int
+    available_bytes: int
+    storage_path: str
+    error_message: Optional[str] = None
+    warning_message: Optional[str] = None
+    safety_margin_bytes: int = 0
+    
+    @computed_field
+    @property
+    def required_human(self) -> str:
+        from .utils import format_bytes
+        return format_bytes(self.required_bytes)
+    
+    @computed_field
+    @property
+    def available_human(self) -> str:
+        from .utils import format_bytes
+        return format_bytes(self.available_bytes)
+    
+    @computed_field
+    @property
+    def safety_margin_human(self) -> str:
+        from .utils import format_bytes
+        return format_bytes(self.safety_margin_bytes)
+    
+    @computed_field
+    @property
+    def total_required_human(self) -> str:
+        from .utils import format_bytes
+        return format_bytes(self.required_bytes + self.safety_margin_bytes)
+
+
+class MigrationStorageRequirement(BaseModel):
+    source_size_bytes: int
+    target_path: str
+    estimated_transfer_size_bytes: int
+    zfs_snapshot_overhead_bytes: int = 0
+    safety_margin_factor: float = 1.2  # 20% safety margin
+    
+    @computed_field
+    @property
+    def source_size_human(self) -> str:
+        from .utils import format_bytes
+        return format_bytes(self.source_size_bytes)
+    
+    @computed_field
+    @property
+    def estimated_transfer_size_human(self) -> str:
+        from .utils import format_bytes
+        return format_bytes(self.estimated_transfer_size_bytes)
+    
+    @computed_field
+    @property
+    def zfs_snapshot_overhead_human(self) -> str:
+        from .utils import format_bytes
+        return format_bytes(self.zfs_snapshot_overhead_bytes)
+    
+    @computed_field
+    @property
+    def total_requirement_human(self) -> str:
+        from .utils import format_bytes
+        total = self.estimated_transfer_size_bytes + self.zfs_snapshot_overhead_bytes
+        return format_bytes(total)
+
+
 class HostCapabilities(BaseModel):
     hostname: str
     docker_available: bool
@@ -21,6 +122,7 @@ class HostCapabilities(BaseModel):
     compose_paths: List[str] = []
     appdata_paths: List[str] = []
     zfs_pools: List[str] = []
+    storage_info: List[StorageInfo] = []
     error: Optional[str] = None
 
 
@@ -80,6 +182,9 @@ class MigrationStatus(BaseModel):
     snapshots: List[str] = []
     target_compose_path: Optional[str] = None
     volume_mapping: Optional[Dict[str, str]] = None
+    # Storage validation information
+    storage_validation_results: Optional[Dict[str, StorageValidationResult]] = None
+    estimated_storage_requirement: Optional[MigrationStorageRequirement] = None
 
 
 class MigrationResponse(BaseModel):
@@ -98,6 +203,7 @@ class StackAnalysis(BaseModel):
     external_volumes: List[str] = []
     estimated_size: Optional[int] = None
     zfs_compatible: bool = False
+    storage_requirement: Optional[MigrationStorageRequirement] = None
 
 
 class HostValidationRequest(BaseModel):
