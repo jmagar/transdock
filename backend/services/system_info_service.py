@@ -91,8 +91,7 @@ class SystemInfoService:
                 first_line = stdout.strip().split('\n')[0]
                 if 'zfs-' in first_line:
                     return first_line.split('zfs-')[1].split()[0]
-                else:
-                    return "unknown"
+                return "unknown"
             else:
                 return "unknown"
         except Exception:

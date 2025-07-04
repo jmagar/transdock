@@ -185,7 +185,7 @@ class MigrationService:
             
         except Exception as e:
             logger.error(f"Failed to convert legacy migration to container migration: {e}")
-            raise ValueError(f"Legacy migration failed: {e}. Please use container migration instead.")
+            raise ValueError(f"Legacy migration failed: {e}. Please use container migration instead.") from e
     
     # === Service Health and Diagnostics ===
     
