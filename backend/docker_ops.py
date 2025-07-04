@@ -376,7 +376,7 @@ class DockerOperations:
             
             # Check if network already exists
             try:
-                existing_network = client.networks.get(network_info.name)
+                client.networks.get(network_info.name)
                 logger.info(f"Network {network_info.name} already exists on {target_host}")
                 client.close()
                 return True
@@ -422,7 +422,7 @@ class DockerOperations:
                     container_config = self._build_container_config(container_info, volume_mapping)
                     
                     # Create and start container
-                    container = client.containers.run(**container_config)
+                    client.containers.run(**container_config)
                     logger.info(f"Successfully recreated container {container_info.name} on {target_host}")
                     success_count += 1
                     
@@ -606,7 +606,7 @@ class DockerOperations:
             client = self.get_docker_client(target_host, ssh_user)
             
             # Pull image using Docker API
-            pulled_image = client.images.pull(image)
+            client.images.pull(image)
             logger.info(f"Successfully pulled image {image} on {target_host}")
             
             client.close()
