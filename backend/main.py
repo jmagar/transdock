@@ -4,7 +4,7 @@ import logging
 from typing import Optional, Dict, Any
 from .models import (
     MigrationRequest, MigrationResponse, HostValidationRequest, 
-    HostInfo, HostCapabilities, StackAnalysis, ContainerMigrationRequest,
+    HostCapabilities, ContainerMigrationRequest,
     ContainerDiscoveryResult, ContainerAnalysis, IdentifierType
 )
 from .migration_service import MigrationService
@@ -100,10 +100,10 @@ async def discover_containers(
             source_ssh_port=source_ssh_port
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"Container discovery failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Container discovery failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Container discovery failed: {e}") from e
 
 
 @app.get("/containers/analyze")
@@ -132,10 +132,10 @@ async def analyze_containers(
             source_host=source_host
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"Container analysis failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Container analysis failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Container analysis failed: {e}") from e
 
 
 # Migration Endpoints
@@ -164,12 +164,12 @@ async def start_container_migration(request: ContainerMigrationRequest) -> Migra
         )
         
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except SecurityValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Security validation failed: {e}")
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {e}") from e
     except Exception as e:
         logger.error(f"Migration failed to start: {e}")
-        raise HTTPException(status_code=500, detail=f"Migration failed to start: {e}")
+        raise HTTPException(status_code=500, detail=f"Migration failed to start: {e}") from e
 
 
 @app.post("/migrations")
@@ -190,7 +190,7 @@ async def start_legacy_migration(request: MigrationRequest) -> MigrationResponse
         
     except Exception as e:
         logger.error(f"Legacy migration failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Legacy migration failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Legacy migration failed: {e}") from e
 
 
 @app.get("/migrations/{migration_id}")
@@ -203,7 +203,7 @@ async def get_migration_status(migration_id: str):
         return status
     except Exception as e:
         logger.error(f"Failed to get migration status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/migrations")
@@ -213,7 +213,7 @@ async def list_migrations():
         return await migration_service.list_migrations()
     except Exception as e:
         logger.error(f"Failed to list migrations: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.delete("/migrations/{migration_id}")
@@ -226,7 +226,7 @@ async def cancel_migration(migration_id: str):
         return {"message": "Migration cancelled successfully"}
     except Exception as e:
         logger.error(f"Failed to cancel migration: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # System Information Endpoints
@@ -237,7 +237,6 @@ async def get_system_info():
     try:
         # Get basic system information
         import platform
-        import os
         
         return {
             "hostname": platform.node(),
@@ -248,7 +247,7 @@ async def get_system_info():
         }
     except Exception as e:
         logger.error(f"Failed to get system info: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/system/docker")
@@ -292,10 +291,10 @@ async def validate_host(request: HostValidationRequest) -> HostCapabilities:
             storage_info=[]
         )
     except SecurityValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Security validation failed: {e}")
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {e}") from e
     except Exception as e:
         logger.error(f"Host validation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Host validation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Host validation failed: {e}") from e
 
 
 @app.get("/hosts/{hostname}/containers")
@@ -316,7 +315,7 @@ async def list_remote_containers(
         }
     except Exception as e:
         logger.error(f"Failed to list remote containers: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ZFS Endpoints (existing functionality)
@@ -337,7 +336,8 @@ async def get_zfs_status():
             pools = []
             if returncode == 0:
                 pools = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
-        except:
+        except (ValueError, SecurityValidationError) as e:
+            logger.warning(f"Failed to list ZFS pools: {e}")
             pools = []
         
         return {
@@ -346,7 +346,7 @@ async def get_zfs_status():
         }
     except Exception as e:
         logger.error(f"Failed to get ZFS status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/datasets")
@@ -373,10 +373,10 @@ async def list_datasets():
         
         return {"datasets": datasets}
     except SecurityValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Security validation failed: {e}")
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {e}") from e
     except Exception as e:
         logger.error(f"Failed to list datasets: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # Utility Endpoints
@@ -406,7 +406,8 @@ async def get_features():
         try:
             docker_ops = migration_service.docker_ops
             await docker_ops.list_all_containers(include_stopped=False)
-        except:
+        except Exception as e:
+            logger.debug(f"Docker not available: {e}")
             docker_available = False
         
         zfs_available = await zfs_service.is_zfs_available()
@@ -425,7 +426,7 @@ async def get_features():
         }
     except Exception as e:
         logger.error(f"Failed to get features: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 if __name__ == "__main__":

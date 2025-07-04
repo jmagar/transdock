@@ -1,5 +1,4 @@
 import platform
-import subprocess
 import logging
 from typing import Dict, Any, Union, List
 from ..zfs_ops import ZFSOperations
@@ -25,19 +24,10 @@ class SystemInfoService:
             "architecture": platform.architecture()[0]
         }
 
-        # Check Docker status safely
+        # Check Docker status safely using Docker API
         try:
-            result = subprocess.run(["docker",
-                                     "version",
-                                     "--format",
-                                     "{{.Server.Version}}"],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=10)
-            if result.returncode == 0:
-                info["docker_version"] = result.stdout.strip()
-            else:
-                info["docker_version"] = "unavailable"
+            version_info = self.docker_ops.client.version()
+            info["docker_version"] = version_info.get('Version', 'unavailable')
         except Exception:
             info["docker_version"] = "unavailable"
 

@@ -93,9 +93,9 @@ class MigrationService:
         """Clean up migration resources"""
         return await self.orchestrator.cleanup_migration(migration_id)
     
-    def get_migration_metrics(self) -> Dict[str, int]:
+    async def get_migration_metrics(self) -> Dict[str, int]:
         """Get migration metrics"""
-        return self.orchestrator.get_migration_metrics()
+        return await self.orchestrator.get_migration_metrics()
     
     # === Container Discovery and Analysis (delegated to ContainerDiscoveryService) ===
     
@@ -219,7 +219,7 @@ class MigrationService:
         
         # Check migration orchestrator
         try:
-            metrics = self.orchestrator.get_migration_metrics()
+            metrics = await self.orchestrator.get_migration_metrics()
             health["services"]["migration_orchestrator"] = {
                 "status": "healthy",
                 "metrics": metrics

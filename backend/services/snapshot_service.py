@@ -21,6 +21,44 @@ class SnapshotService:
         """Generate a timestamp for snapshot naming"""
         return datetime.now().strftime("%Y%m%d_%H%M%S")
     
+    async def _get_dataset_name_by_mountpoint(self, mountpoint: str, host_info: Optional[HostInfo] = None) -> Optional[str]:
+        """Get ZFS dataset name by mountpoint using ZFS list command"""
+        try:
+            if host_info:
+                # Remote command
+                cmd = "zfs list -H -o name,mountpoint"
+                returncode, stdout, stderr = await self.host_service.run_remote_command(host_info, cmd)
+            else:
+                # Local command
+                validated_cmd = SecurityUtils.validate_zfs_command_args("list", "-H", "-o", "name,mountpoint")
+                returncode, stdout, stderr = await self.zfs_ops.run_command(validated_cmd)
+            
+            if returncode != 0:
+                logger.warning(f"Failed to list ZFS datasets: {stderr}")
+                return None
+            
+            # Parse output to find matching mountpoint
+            for line in stdout.strip().split('\n'):
+                if line.strip():
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        dataset_name, mount_path = parts[0], parts[1]
+                        if mount_path == mountpoint:
+                            return dataset_name
+            
+            # If no exact match found, try fallback to string replacement
+            if mountpoint.startswith('/mnt/'):
+                return mountpoint[5:]  # Remove /mnt/ prefix
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error getting dataset name for {mountpoint}: {e}")
+            # Fallback to string replacement
+            if mountpoint.startswith('/mnt/'):
+                return mountpoint[5:]
+            return None
+    
     async def create_local_snapshots(self, compose_dir: str, volumes: List[VolumeMount], 
                                    timestamp: Optional[str] = None) -> List[Tuple[str, str]]:
         """Create ZFS snapshots for all local volumes"""
@@ -56,14 +94,18 @@ class SnapshotService:
         
         if returncode != 0:
             # Try to create dataset
-            dataset_name = compose_dir.replace('/mnt/', '')
+            dataset_name = await self._get_dataset_name_by_mountpoint(compose_dir, source_host_info)
+            if not dataset_name:
+                raise Exception(f"Could not determine dataset name for {compose_dir}")
             zfs_create_cmd = f"zfs create -p {SecurityUtils.escape_shell_argument(dataset_name)}"
             returncode, stdout, stderr = await self.host_service.run_remote_command(source_host_info, zfs_create_cmd)
             if returncode != 0:
                 raise Exception(f"Failed to convert {compose_dir} to dataset: {stderr}")
         
         # Create snapshot for compose dataset
-        dataset_name = compose_dir.replace('/mnt/', '')
+        dataset_name = await self._get_dataset_name_by_mountpoint(compose_dir, source_host_info)
+        if not dataset_name:
+            raise Exception(f"Could not determine dataset name for {compose_dir}")
         snapshot_name = f"{dataset_name}@migration_{timestamp}"
         zfs_snapshot_cmd = f"zfs snapshot {SecurityUtils.escape_shell_argument(snapshot_name)}"
         returncode, stdout, stderr = await self.host_service.run_remote_command(source_host_info, zfs_snapshot_cmd)
@@ -81,7 +123,10 @@ class SnapshotService:
             
             if returncode != 0:
                 # Try to create dataset
-                dataset_name = volume.source.replace('/mnt/', '')
+                dataset_name = await self._get_dataset_name_by_mountpoint(volume.source, source_host_info)
+                if not dataset_name:
+                    logger.warning(f"Could not determine dataset name for {volume.source}, skipping...")
+                    continue
                 zfs_create_cmd = f"zfs create -p {SecurityUtils.escape_shell_argument(dataset_name)}"
                 returncode, stdout, stderr = await self.host_service.run_remote_command(source_host_info, zfs_create_cmd)
                 if returncode != 0:
@@ -89,7 +134,10 @@ class SnapshotService:
                     continue
             
             # Create snapshot for volume
-            dataset_name = volume.source.replace('/mnt/', '')
+            dataset_name = await self._get_dataset_name_by_mountpoint(volume.source, source_host_info)
+            if not dataset_name:
+                logger.warning(f"Could not determine dataset name for {volume.source}, skipping...")
+                continue
             snapshot_name = f"{dataset_name}@migration_{timestamp}"
             zfs_snapshot_cmd = f"zfs snapshot {SecurityUtils.escape_shell_argument(snapshot_name)}"
             returncode, stdout, stderr = await self.host_service.run_remote_command(source_host_info, zfs_snapshot_cmd)
@@ -107,12 +155,16 @@ class SnapshotService:
     async def _create_snapshot_for_volume(self, volume: VolumeMount, timestamp: str) -> Tuple[str, str]:
         """Create a snapshot for a single volume"""
         dataset = volume.source
-        snapshot_name = f"{dataset}@{timestamp}"
-        success = await self.zfs_ops.create_snapshot(dataset, snapshot_name)
-        if not success:
-            logger.error(f"Failed to create snapshot for {dataset}")
+        try:
+            # create_snapshot returns the snapshot name string, not a boolean
+            snapshot_name = await self.zfs_ops.create_snapshot(dataset)
+            if not snapshot_name:  # Check if empty or None
+                logger.error(f"Failed to create snapshot for {dataset}")
+                return ("", dataset)  # Return empty snapshot name to indicate failure
+            return (snapshot_name, dataset)
+        except Exception as e:
+            logger.error(f"Failed to create snapshot for {dataset}: {e}")
             return ("", dataset)  # Return empty snapshot name to indicate failure
-        return (snapshot_name, dataset)
     
     async def cleanup_snapshots(self, snapshot_names: List[str]):
         """Clean up multiple snapshots"""

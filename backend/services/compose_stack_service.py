@@ -1,6 +1,6 @@
 import os
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from ..docker_ops import DockerOperations
 from ..zfs_ops import ZFSOperations
 from ..security_utils import SecurityUtils, SecurityValidationError
@@ -33,44 +33,53 @@ class ComposeStackService:
 
             if os.path.exists(validated_base):
                 for item in os.listdir(validated_base):
-                    # Validate each stack name
-                    try:
-                        if not self._is_valid_stack_name(item):
-                            continue
-
-                        stack_path = SecurityUtils.sanitize_path(os.path.join(
-                            validated_base, item), validated_base, allow_absolute=True)
-
-                        if os.path.isdir(stack_path):
-                            # Look for common compose file names
-                            compose_file = None
-                            for filename in ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]:
-                                candidate = os.path.join(stack_path, filename)
-                                if os.path.isfile(candidate):
-                                    compose_file = candidate
-                                    break
-                            
-                            if compose_file:
-                                stacks.append({
-                                    "name": item,
-                                    "compose_file": compose_file
-                                })
-                    except SecurityValidationError:
-                        # Skip invalid stack names silently
-                        continue
+                    stack_info = self._process_stack_directory(item, validated_base)
+                    if stack_info:
+                        stacks.append(stack_info)
 
             return stacks
-        except Exception as e:
+        except (OSError, SecurityValidationError) as e:
             logger.error(f"Failed to get compose stacks: {e}")
             return []
+    
+    def _process_stack_directory(self, item: str, validated_base: str) -> Optional[Dict[str, str]]:
+        """Process a single stack directory and return stack info if valid"""
+        try:
+            if not self._is_valid_stack_name(item):
+                return None
+
+            stack_path = SecurityUtils.sanitize_path(
+                os.path.join(validated_base, item), validated_base, allow_absolute=True)
+
+            if not os.path.isdir(stack_path):
+                return None
+            
+            # Look for common compose file names
+            compose_file = self._find_compose_file(stack_path)
+            if compose_file:
+                return {
+                    "name": item,
+                    "compose_file": compose_file
+                }
+            return None
+            
+        except SecurityValidationError:
+            # Skip invalid stack names silently
+            return None
+    
+    def _find_compose_file(self, stack_path: str) -> Optional[str]:
+        """Find compose file in stack directory"""
+        for filename in ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]:
+            candidate = os.path.join(stack_path, filename)
+            if os.path.isfile(candidate):
+                return candidate
+        return None
     
     async def get_stack_info(self, stack_name: str) -> Dict[str, Any]:
         """Get detailed information about a specific compose stack"""
         # Validate stack name for security
-        if not stack_name or len(stack_name) > 64:
-            raise ValueError("Invalid stack name length")
-        if not str(stack_name).replace('-', '').replace('_', '').replace('.', '').isalnum():
-            raise ValueError("Stack name contains invalid characters")
+        if not self._is_valid_stack_name(stack_name):
+            raise ValueError("Invalid stack name")
 
         compose_base = SecurityUtils.sanitize_path(
             self.compose_base_path, allow_absolute=True)
@@ -83,13 +92,7 @@ class ComposeStackService:
             raise FileNotFoundError("Compose stack not found")
 
         # Look for common compose file names
-        compose_file = None
-        for filename in ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]:
-            candidate = os.path.join(stack_path, filename)
-            if os.path.isfile(candidate):
-                compose_file = candidate
-                break
-        
+        compose_file = self._find_compose_file(stack_path)
         if not compose_file:
             raise FileNotFoundError("No compose file found in stack")
 
