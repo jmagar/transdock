@@ -149,7 +149,7 @@ class DockerOperations:
         try:
             client = self.get_docker_client(host, ssh_user)
             containers = []
-            filtered_containers = client.containers.list(all=True, filters={"label": list(label_filters.keys())})
+            filtered_containers = client.containers.list(all=True, filters={"label": [f"{key}={value}" for key, value in label_filters.items()]})
             
             for container in filtered_containers:
                 # Verify all label filters match
