@@ -213,9 +213,13 @@ class DockerOperations:
             for network in all_networks:
                 labels = network.attrs.get('Labels') or {}
                 if labels.get('com.docker.compose.project') == project_name:
+                    # Handle potential None values
+                    network_id = network.id or ''
+                    network_name = network.name or ''
+                    
                     network_info = NetworkInfo(
-                        id=network.id,
-                        name=network.name,
+                        id=network_id,
+                        name=network_name,
                         driver=network.attrs['Driver'],
                         scope=network.attrs['Scope'],
                         attachable=network.attrs['Attachable'],
