@@ -69,19 +69,28 @@ class DockerOperations:
             except:
                 pass
     
-    def get_docker_client(self, host: Optional[str] = None, ssh_user: str = "root") -> docker.DockerClient:
-        """Get Docker client for local or remote host"""
+    def get_docker_client(self, host: Optional[str] = None, ssh_user: str = "root", ssh_port: int = 22) -> docker.DockerClient:
+        """Get Docker client for local or remote host
+        
+        Args:
+            host (Optional[str]): Remote host address. If None, use local client.
+            ssh_user (str): SSH username for remote connection. Default is "root".
+            ssh_port (int): SSH port for remote connection. Default is 22.
+        
+        Returns:
+            docker.DockerClient: Docker client instance.
+        """
         if host:
             # Create remote Docker client via SSH
-            base_url = f"ssh://{ssh_user}@{host}"
+            base_url = f"ssh://{ssh_user}@{host}:{ssh_port}"
             try:
                 remote_client = docker.DockerClient(base_url=base_url)
                 # Test connection
                 remote_client.ping()
-                logger.info(f"Remote Docker API connection established to {host}")
+                logger.info(f"Remote Docker API connection established to {host}:{ssh_port}")
                 return remote_client
             except DockerException as e:
-                logger.error(f"Failed to connect to remote Docker API at {host}: {e}")
+                logger.error(f"Failed to connect to remote Docker API at {host}:{ssh_port}: {e}")
                 raise
         else:
             return self.client  # Local client
