@@ -300,7 +300,8 @@ class TransferOperations:
             source_host: Optional[str] = None,
             source_ssh_user: str = "root",
             source_ssh_port: int = 22) -> bool:
-        """Transfer data for a single volume mount (supports remote sources)"""
+        """Transfer a volume's data based on the chosen method"""
+
         if transfer_method == TransferMethod.ZFS_SEND:
             # For ZFS send, we need to determine the target dataset name
             # Convert target path to dataset format
@@ -308,39 +309,37 @@ class TransferOperations:
                 target_dataset = target_path[5:]  # Remove /mnt/ prefix
             else:
                 target_dataset = f"zpool{target_path}"  # Assume default zpool
-
+        
             if source_host:
                 # Remote source ZFS send
                 return await self.transfer_via_remote_zfs_send(
                     snapshot_name, source_host, source_ssh_user, source_ssh_port,
                     target_host, target_dataset, ssh_user, ssh_port
                 )
-            else:
-                # Local source ZFS send
-                return await self.transfer_via_zfs_send(
-                    snapshot_name, target_host, target_dataset, ssh_user, ssh_port
-                )
+            # Local source ZFS send
+            return await self.transfer_via_zfs_send(
+                snapshot_name, target_host, target_dataset, ssh_user, ssh_port
+            )
+        
+        # RSYNC
+        if source_host:
+            # Remote source rsync
+            return await self.transfer_via_remote_rsync(
+                volume.source, source_host, source_ssh_user, source_ssh_port,
+                target_host, target_path, ssh_user, ssh_port
+            )
+        # Local source rsync - mount the snapshot and rsync
+        mount_point = await self.mount_snapshot_for_rsync(snapshot_name)
+        if not mount_point:
+            return False
 
-        else:  # RSYNC
-            if source_host:
-                # Remote source rsync
-                return await self.transfer_via_remote_rsync(
-                    volume.source, source_host, source_ssh_user, source_ssh_port,
-                    target_host, target_path, ssh_user, ssh_port
-                )
-            else:
-                # Local source rsync - mount the snapshot and rsync
-                mount_point = await self.mount_snapshot_for_rsync(snapshot_name)
-                if not mount_point:
-                    return False
-
-                try:
-                    success = await self.transfer_via_rsync(
-                        mount_point, target_host, target_path, ssh_user, ssh_port
-                    )
-                    return success
-                finally:
-                    await self.cleanup_rsync_mount(mount_point, snapshot_name)
+        try:
+            success = await self.transfer_via_rsync(
+                mount_point, target_host, target_path, ssh_user, ssh_port
+            )
+            return success
+        finally:
+            await self.cleanup_rsync_mount(mount_point, snapshot_name)
 
     async def create_volume_mapping(self, volumes: List[VolumeMount],
                                     target_base_path: str) -> Dict[str, str]:
@@ -559,60 +558,55 @@ class TransferOperations:
             target_path: str,
             target_ssh_user: str = "root",
             target_ssh_port: int = 22) -> bool:
-        """Transfer files from remote source to remote target using rsync"""
+        """Transfer data using rsync between two remote hosts."""
+        logger.info(
+            f"Transferring {source_path} from {source_host} to {target_host}:{target_path} via rsync")
+
         try:
-            # Validate inputs
+            # Validate all inputs
             SecurityUtils.validate_hostname(source_host)
             SecurityUtils.validate_username(source_ssh_user)
             SecurityUtils.validate_port(source_ssh_port)
             SecurityUtils.validate_hostname(target_host)
             SecurityUtils.validate_username(target_ssh_user)
             SecurityUtils.validate_port(target_ssh_port)
-            source_path = SecurityUtils.sanitize_path(source_path, allow_absolute=True)
-            target_path = SecurityUtils.sanitize_path(target_path, allow_absolute=True)
             
-            # Create target directory on target host first
-            mkdir_cmd = f"mkdir -p {SecurityUtils.escape_shell_argument(target_path)}"
-            target_ssh_cmd = SecurityUtils.build_ssh_command(
-                target_host, target_ssh_user, target_ssh_port, mkdir_cmd
+            # Sanitize paths
+            safe_source_path = SecurityUtils.sanitize_path(source_path, allow_absolute=True)
+            safe_target_path = SecurityUtils.sanitize_path(target_path, allow_absolute=True)
+
+            # Ensure remote target directory exists
+            await self.create_target_directories(
+                target_host, [os.path.dirname(safe_target_path)], target_ssh_user, target_ssh_port
+            )
+
+            # Build the rsync command to be executed on the source host
+            rsync_cmd_str = (
+                f"rsync -avzP --delete "
+                f"-e '{SecurityUtils.escape_shell_argument(f'ssh -p {target_ssh_port}')}' "
+                f"{SecurityUtils.escape_shell_argument(f'{safe_source_path}/')} "
+                f"{SecurityUtils.escape_shell_argument(f'{target_ssh_user}@{target_host}:{safe_target_path}/')}"
             )
             
-            returncode, stdout, stderr = await self.run_command(target_ssh_cmd)
-            if returncode != 0:
-                logger.error(f"Failed to create target directory: {stderr}")
-                return False
-            
-            # Build rsync command for remote-to-remote transfer
-            # Format: rsync -avz -e ssh source_host:source_path target_host:target_path
-            rsync_cmd = [
-                "rsync",
-                "-avz",
-                "--progress",
-                "-e", f"ssh -p {source_ssh_port}",
-                f"{source_ssh_user}@{source_host}:{source_path}/",
-                f"{target_ssh_user}@{target_host}:{target_path}/"
-            ]
-            
-            # Execute rsync
-            process = await asyncio.create_subprocess_exec(
-                *rsync_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+            # Build the outer SSH command to run rsync on the source host
+            cmd = SecurityUtils.build_ssh_command(
+                source_host,
+                source_ssh_user,
+                source_ssh_port,
+                rsync_cmd_str
             )
-            
-            stdout, stderr = await process.communicate()
-            returncode = process.returncode if process.returncode is not None else 1
-            
-            if returncode != 0:
-                logger.error(f"Remote rsync failed: {stderr.decode()}")
-                return False
-            
-            logger.info(f"Successfully transferred {source_path} from {source_host} to {target_host}")
-            return True
             
         except SecurityValidationError as e:
-            logger.error(f"Security validation failed for remote rsync: {e}")
+            logger.error(f"Security validation failed: {e}")
             return False
-        except Exception as e:
-            logger.error(f"Remote rsync failed: {e}")
+
+        returncode, stdout, stderr = await self.run_command(cmd)
+
+        if returncode != 0:
+            logger.error(
+                f"Remote rsync failed for {safe_source_path}: {stderr}")
             return False
+
+        logger.info(
+            f"Successfully transferred {safe_source_path} from {source_host} to {target_host} via rsync")
+        return True

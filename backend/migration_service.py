@@ -237,7 +237,7 @@ class MigrationService:
                 if result.warning_message:
                     logger.warning(f"Storage warning for {location}: {result.warning_message}")
             
-            logger.info(f"Storage validation passed for migration {migration_id}")
+            logger.info("Final storage validation passed - ready for transfer")
 
             # Step 4: Stop the compose stack
             await self._update_status(migration_id, "stopping", 20, "Stopping Docker compose stack")
@@ -867,30 +867,20 @@ class MigrationService:
                                                   {}).keys())}
 
     async def _create_local_snapshots(self, compose_dir: str, volumes: List, timestamp: str) -> List[Tuple[str, str]]:
-        """Create ZFS snapshots locally"""
-        snapshots = []
+        """Create ZFS snapshots for all local volumes"""
+        snapshot_tasks = []
+        for volume in volumes:
+            snapshot_tasks.append(
+                self._create_snapshot_for_volume(volume, timestamp)
+            )
         
-        # Snapshot the compose dataset
-        if not await self.zfs_ops.is_dataset(compose_dir) and not await self.zfs_ops.create_dataset(compose_dir):
-            raise Exception(f"Failed to convert {compose_dir} to dataset")
-
-        compose_snapshot = await self.zfs_ops.create_snapshot(compose_dir, f"migration_{timestamp}")
-        snapshots.append((compose_snapshot, compose_dir))
-
-        # Process each volume mount
-        for i, volume in enumerate(volumes):
-            # Check if volume source is a dataset, convert if not
-            if not await self.zfs_ops.is_dataset(volume.source) and not await self.zfs_ops.create_dataset(volume.source):
-                logger.warning(f"Failed to convert {volume.source} to dataset, skipping...")
-                continue
-
-            # Create snapshot
-            volume_snapshot = await self.zfs_ops.create_snapshot(volume.source, f"migration_{timestamp}")
-            snapshots.append((volume_snapshot, volume.source))
-            volume.is_dataset = True
-            volume.dataset_path = await self.zfs_ops.get_dataset_name(volume.source)
+        results = await asyncio.gather(*snapshot_tasks)
         
-        return snapshots
+        # Check for failures
+        if any(not result[0] for result in results):
+            raise Exception("Failed to create one or more snapshots")
+        
+        return results
     
     async def _create_remote_snapshots(self, source_host_info: HostInfo, compose_dir: str, volumes: List, timestamp: str) -> List[Tuple[str, str]]:
         """Create ZFS snapshots on remote host"""
@@ -949,3 +939,12 @@ class MigrationService:
             volume.dataset_path = dataset_name
         
         return snapshots
+
+    async def _create_snapshot_for_volume(self, volume: Dict, timestamp: str) -> Tuple[str, str]:
+        """Create a snapshot for a single volume"""
+        dataset = volume['source']
+        snapshot_name = f"{dataset}@{timestamp}"
+        success = await self.zfs_ops.create_snapshot(dataset, snapshot_name)
+        if not success:
+            raise Exception(f"Failed to create snapshot for {dataset}")
+        return snapshot_name, dataset

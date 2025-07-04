@@ -1,12 +1,12 @@
 import logging
 import os
 import yaml
-import json
 import asyncio
 from typing import List, Dict, Optional, Tuple
 from .models import HostInfo, HostCapabilities, RemoteStack, StackAnalysis, VolumeMount, StorageInfo, StorageValidationResult, MigrationStorageRequirement
 from .security_utils import SecurityUtils, SecurityValidationError
 from .docker_ops import DockerOperations
+from .utils import format_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -123,17 +123,34 @@ class HostService:
         for path in paths:
             # Handle wildcard paths
             if '*' in path:
-                # Use find to expand wildcards
-                find_cmd = f"find {path.replace('*', '')} -maxdepth 1 -type d 2>/dev/null || true"
-                returncode, stdout, stderr = await self.run_remote_command(host_info, find_cmd)
-                if returncode == 0 and stdout.strip():
-                    existing_paths.extend([line.strip() for line in stdout.split('\n') if line.strip()])
+                try:
+                    # Securely split the path
+                    base_path, pattern = SecurityUtils.split_wildcard_path(path)
+                    
+                    # Sanitize the base path
+                    sanitized_base_path = SecurityUtils.sanitize_path(base_path, allow_absolute=True)
+                    
+                    # Build a safer find command
+                    find_cmd = (
+                        f"find {SecurityUtils.escape_shell_argument(sanitized_base_path)} "
+                        f"-maxdepth 1 -type d -name '{SecurityUtils.escape_shell_argument(pattern)}' 2>/dev/null || true"
+                    )
+                    
+                    returncode, stdout, stderr = await self.run_remote_command(host_info, find_cmd)
+                    if returncode == 0 and stdout.strip():
+                        existing_paths.extend([line.strip() for line in stdout.split('\n') if line.strip()])
+                except ValueError as e:
+                    logger.warning(f"Skipping invalid wildcard path: {path} ({e})")
             else:
                 # Check if directory exists
-                test_cmd = f"test -d {path} && echo 'exists' || echo 'not_found'"
-                returncode, stdout, stderr = await self.run_remote_command(host_info, test_cmd)
-                if returncode == 0 and 'exists' in stdout:
-                    existing_paths.append(path)
+                try:
+                    sanitized_path = SecurityUtils.sanitize_path(path, allow_absolute=True)
+                    test_cmd = f"test -d {SecurityUtils.escape_shell_argument(sanitized_path)} && echo 'exists' || echo 'not_found'"
+                    returncode, stdout, stderr = await self.run_remote_command(host_info, test_cmd)
+                    if returncode == 0 and 'exists' in stdout:
+                        existing_paths.append(path)
+                except ValueError as e:
+                    logger.warning(f"Skipping invalid path: {path} ({e})")
         
         return existing_paths
     
@@ -198,10 +215,9 @@ class HostService:
                     
                     if running_count == len(container_ids):
                         return "running"
-                    elif running_count > 0:
+                    if running_count > 0:
                         return "partial"
-                    else:
-                        return "stopped"
+                    return "stopped"
                 else:
                     return "stopped"
             else:
@@ -238,15 +254,7 @@ class HostService:
         """Analyze a remote stack and return detailed information"""
         try:
             # Find compose file
-            compose_file = None
-            for filename in ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]:
-                test_path = os.path.join(stack_path, filename)
-                test_cmd = f"test -f {SecurityUtils.escape_shell_argument(test_path)} && echo 'exists' || echo 'not_found'"
-                returncode, stdout, stderr = await self.run_remote_command(host_info, test_cmd)
-                if returncode == 0 and 'exists' in stdout:
-                    compose_file = test_path
-                    break
-            
+            compose_file = await self._find_compose_file(host_info, stack_path)
             if not compose_file:
                 raise ValueError(f"No compose file found in {stack_path}")
             
@@ -262,7 +270,7 @@ class HostService:
             
             # Extract volume mounts
             volumes = []
-            for service_name, service_config in services.items():
+            for _, service_config in services.items():
                 service_volumes = service_config.get('volumes', [])
                 for volume in service_volumes:
                     if isinstance(volume, str):
@@ -315,6 +323,16 @@ class HostService:
             logger.error(f"Failed to analyze stack: {e}")
             raise ValueError(f"Failed to analyze stack: {e}")
     
+    async def _find_compose_file(self, host_info: HostInfo, stack_path: str) -> Optional[str]:
+        """Find the compose file in a remote stack directory."""
+        for filename in ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]:
+            test_path = os.path.join(stack_path, filename)
+            test_cmd = f"test -f {SecurityUtils.escape_shell_argument(test_path)} && echo 'exists' || echo 'not_found'"
+            returncode, stdout, stderr = await self.run_remote_command(host_info, test_cmd)
+            if returncode == 0 and 'exists' in stdout:
+                return test_path
+        return None
+    
     async def _check_zfs_compatibility(self, host_info: HostInfo, volumes: List[VolumeMount]) -> bool:
         """Check if all volumes are on ZFS"""
         try:
@@ -351,20 +369,12 @@ class HostService:
         """Start a remote stack"""
         try:
             # Find compose file
-            compose_file = None
-            for filename in ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]:
-                test_path = os.path.join(stack_path, filename)
-                test_cmd = f"test -f {SecurityUtils.escape_shell_argument(test_path)} && echo 'exists' || echo 'not_found'"
-                returncode, stdout, stderr = await self.run_remote_command(host_info, test_cmd)
-                if returncode == 0 and 'exists' in stdout:
-                    compose_file = filename
-                    break
-            
+            compose_file = await self._find_compose_file(host_info, stack_path)
             if not compose_file:
                 raise ValueError(f"No compose file found in {stack_path}")
             
             # Start the stack
-            start_cmd = f"cd {SecurityUtils.escape_shell_argument(stack_path)} && docker-compose -f {compose_file} up -d"
+            start_cmd = f"cd {SecurityUtils.escape_shell_argument(stack_path)} && docker-compose -f {os.path.basename(compose_file)} up -d"
             returncode, stdout, stderr = await self.run_remote_command(host_info, start_cmd)
             
             if returncode != 0:
@@ -382,20 +392,12 @@ class HostService:
         """Stop a remote stack"""
         try:
             # Find compose file
-            compose_file = None
-            for filename in ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]:
-                test_path = os.path.join(stack_path, filename)
-                test_cmd = f"test -f {SecurityUtils.escape_shell_argument(test_path)} && echo 'exists' || echo 'not_found'"
-                returncode, stdout, stderr = await self.run_remote_command(host_info, test_cmd)
-                if returncode == 0 and 'exists' in stdout:
-                    compose_file = filename
-                    break
-            
+            compose_file = await self._find_compose_file(host_info, stack_path)
             if not compose_file:
                 raise ValueError(f"No compose file found in {stack_path}")
             
             # Stop the stack
-            stop_cmd = f"cd {SecurityUtils.escape_shell_argument(stack_path)} && docker-compose -f {compose_file} down"
+            stop_cmd = f"cd {SecurityUtils.escape_shell_argument(stack_path)} && docker-compose -f {os.path.basename(compose_file)} down"
             returncode, stdout, stderr = await self.run_remote_command(host_info, stop_cmd)
             
             if returncode != 0:
@@ -443,7 +445,6 @@ class HostService:
                                 mount_point=mount_point
                             ))
                             
-                            from .utils import format_bytes
                             logger.info(f"Storage info for {safe_path}: {format_bytes(available_bytes)} available")
                 
             except Exception as e:
@@ -497,15 +498,12 @@ class HostService:
             )
             
             if not is_valid:
-                from .utils import format_bytes
                 shortage = total_required - available_bytes
                 result.error_message = f"Insufficient storage space. Need {format_bytes(total_required)} ({format_bytes(required_bytes)} + {format_bytes(safety_margin_bytes)} safety margin), but only {format_bytes(available_bytes)} available. Shortage: {format_bytes(shortage)}"
             elif available_bytes < required_bytes * 1.5:
                 # Warning if less than 50% extra space
-                from .utils import format_bytes
                 result.warning_message = f"Low storage space warning. Only {format_bytes(available_bytes)} available for {format_bytes(required_bytes)} required"
             
-            from .utils import format_bytes
             logger.info(f"Storage validation for {safe_path}: {'✅ PASS' if is_valid else '❌ FAIL'} - {format_bytes(available_bytes)} available, {format_bytes(total_required)} required")
             
             return result
@@ -521,7 +519,7 @@ class HostService:
             )
     
     async def estimate_migration_storage_requirement(self, host_info: HostInfo, volumes: List[VolumeMount], 
-                                                    include_zfs_overhead: bool = True) -> MigrationStorageRequirement:
+                                                     include_zfs_overhead: bool = True) -> MigrationStorageRequirement:
         """Estimate storage requirements for a migration"""
         try:
             # Calculate total source size
@@ -538,7 +536,6 @@ class HostService:
                             size_str = stdout.split()[0]
                             size = int(size_str)
                             source_size_bytes += size
-                            from .utils import format_bytes
                             logger.info(f"Volume {volume.source}: {format_bytes(size)}")
                         except (ValueError, IndexError):
                             logger.warning(f"Could not parse size for {volume.source}")
@@ -564,11 +561,10 @@ class HostService:
             )
             
             total_required = (estimated_transfer_size_bytes + 
-                            zfs_snapshot_overhead_bytes)
+                              zfs_snapshot_overhead_bytes)
             
-            from .utils import format_bytes
             logger.info(f"Migration storage requirement: {format_bytes(total_required)} total "
-                       f"({format_bytes(source_size_bytes)} source + {format_bytes(zfs_snapshot_overhead_bytes)} ZFS overhead)")
+                        f"({format_bytes(source_size_bytes)} source + {format_bytes(zfs_snapshot_overhead_bytes)} ZFS overhead)")
             
             return requirement
             
@@ -582,8 +578,8 @@ class HostService:
             )
     
     async def validate_migration_storage(self, source_host_info: HostInfo, target_host_info: HostInfo,
-                                        volumes: List[VolumeMount], target_base_path: str,
-                                        use_zfs: bool = False) -> Dict[str, StorageValidationResult]:
+                                         volumes: List[VolumeMount], target_base_path: str,
+                                         use_zfs: bool = False) -> Dict[str, StorageValidationResult]:
         """Validate storage requirements for a complete migration"""
         results = {}
         

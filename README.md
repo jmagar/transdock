@@ -20,6 +20,26 @@ TransDock is a powerful tool for migrating Docker Compose stacks between any mac
 - **Error Recovery**: Comprehensive error handling with rollback capabilities
 - **Migration Control**: Cancel running migrations with cleanup operations
 
+### 🔧 Advanced ZFS Features
+
+- **ZFS Pool Health Monitoring**: Check pool status, health, and disk conditions
+- **Pool Scrubbing**: Automated pool maintenance with scrub status tracking
+- **Dataset Property Management**: Configure compression, deduplication, and custom properties
+- **Advanced Snapshot Management**: Incremental snapshots, rollback capabilities, and retention policies
+- **Performance Monitoring**: Real-time I/O statistics and ARC cache performance metrics
+- **Backup Strategies**: Full/incremental/differential backups with bookmark support
+- **ZFS Encryption**: Native encryption support with key management
+- **Quota and Reservation Management**: Automated quota monitoring with alerts
+- **Migration Optimization**: ZFS-specific optimizations for faster migrations
+
+### 💾 Storage Space Validation
+
+- **Pre-Migration Validation**: Check available storage space before starting migrations
+- **Multi-Path Storage Analysis**: Analyze storage across multiple mount points
+- **Human-Readable Storage Reports**: Clear storage information with safety margins
+- **Automated Safety Checks**: Prevent migrations when insufficient space is available
+- **Real-Time Storage Monitoring**: Monitor storage usage during migration processes
+
 ## 🌐 Multi-Host Architecture
 
 TransDock supports all migration scenarios:
@@ -205,6 +225,76 @@ for stack in stacks:
     print(f"Stack: {stack['name']} - Status: {stack['status']}")
 ```
 
+### Storage Space Validation
+```python
+# Check storage space before migration
+response = requests.get(
+    "http://localhost:8000/api/hosts/remote-server.local/storage",
+    params={
+        "paths": "/mnt/cache,/mnt/user",
+        "ssh_user": "root"
+    }
+)
+
+storage_info = response.json()["storage_info"]
+for storage in storage_info:
+    print(f"Path: {storage['path']}")
+    print(f"Available: {storage['available_human']} ({storage['usage_percent']:.1f}% used)")
+
+# Validate storage space for migration
+validation_response = requests.post(
+    "http://localhost:8000/api/hosts/remote-server.local/storage/validate",
+    json={
+        "required_space": 100000000000,  # 100GB
+        "target_path": "/mnt/cache",
+        "safety_margin": 0.1
+    },
+    params={"ssh_user": "root"}
+)
+
+if validation_response.json()["validation_result"]["validation_passed"]:
+    print("✅ Storage validation passed - migration can proceed")
+else:
+    print("❌ Insufficient storage space")
+```
+
+### Advanced ZFS Management
+```python
+# Check pool health
+response = requests.get("http://localhost:8000/api/zfs/pools/cache/health")
+health = response.json()
+print(f"Pool health: {health['state']} - {health['capacity']['usage_percent']:.1f}% used")
+
+# Get dataset properties
+response = requests.get(
+    "http://localhost:8000/api/zfs/datasets/cache/appdata/properties",
+    params={"properties": "compression,quota,used"}
+)
+properties = response.json()["properties"]
+print(f"Compression: {properties['compression']}, Used: {properties['used']}")
+
+# Create incremental backup
+response = requests.post(
+    "http://localhost:8000/api/zfs/datasets/cache/appdata/snapshots/incremental",
+    json={
+        "base_snapshot": "backup_20240115_103000",
+        "snapshot_name": "backup_20240115_143000"
+    }
+)
+if response.json()["success"]:
+    print(f"Created incremental backup - saved {response.json()['size_saved']}")
+
+# Monitor ZFS performance
+response = requests.get("http://localhost:8000/api/zfs/pools/cache/iostat")
+stats = response.json()["statistics"]
+print(f"Read: {stats['read_bandwidth']}, Write: {stats['write_bandwidth']}")
+
+# Check quota usage
+response = requests.get("http://localhost:8000/api/zfs/datasets/cache/appdata/quota/usage")
+quota_info = response.json()["quota_usage"]
+print(f"Quota usage: {quota_info['used_human']} / {quota_info['quota_human']} ({quota_info['quota_usage_percent']:.1f}%)")
+```
+
 ### Migration Status Tracking
 
 ```python
@@ -227,21 +317,28 @@ See the [API Documentation](docs/API.md) for complete endpoint details.
 
 ## 🔄 Migration Process
 
-TransDock follows a 13-step migration workflow:
+TransDock follows a comprehensive 13-step migration workflow with integrated storage validation:
 
 1. **Validation** - Check inputs, SSH connectivity, and host capabilities
-2. **Parsing** - Parse docker-compose file from source location
-3. **Analysis** - Extract volume mounts and dependencies
-4. **Stopping** - Stop source Docker stack
-5. **Dataset Conversion** - Convert directories to ZFS datasets
-6. **Snapshotting** - Create atomic ZFS snapshots
-7. **Capability Check** - Determine optimal transfer method
-8. **Transfer Method** - Choose ZFS send or rsync based on host capabilities
-9. **Data Transfer** - Move data between hosts (local/remote combinations)
-10. **Path Updates** - Update compose file paths for target environment
-11. **Stack Startup** - Start stack on target machine
-12. **Cleanup** - Remove temporary snapshots and files
-13. **Verification** - Verify container deployment and health
+2. **Storage Validation** - Verify sufficient storage space with safety margins
+3. **Parsing** - Parse docker-compose file from source location
+4. **Analysis** - Extract volume mounts and dependencies
+5. **Stopping** - Stop source Docker stack
+6. **Snapshot Creation** - Create ZFS snapshots of all volumes for consistent data transfer
+7. **Capability Check** - Verify target host capabilities (Docker, ZFS availability)
+8. **Transfer Method Selection** - Choose optimal method (ZFS send or rsync) based on capabilities
+9. **Data Transfer** - Transfer all volume data to the target host
+10. **Path Translation** - Update docker-compose file with new paths
+11. **Final Validation** - Verify storage and paths on target host
+12. **Stack Startup** - Start stack on target machine
+13. **Cleanup** - Remove temporary snapshots and files
+14. **Verification** - Verify container deployment and health
+
+### Storage Validation Features
+- **Multi-checkpoint validation** at steps 2, 8, and during transfer
+- **Safety margins** prevent system disk space exhaustion
+- **Human-readable reporting** with clear storage requirements
+- **Automatic validation failure handling** with detailed error messages
 
 ## 🎯 Multi-Host Use Cases
 
@@ -305,6 +402,60 @@ curl "http://localhost:8000/api/hosts/remote-server.local/compose/stacks?ssh_use
 curl -X POST "http://localhost:8000/api/hosts/remote-server.local/compose/stacks/authelia/start?ssh_user=root&compose_path=/mnt/cache/compose"
 ```
 
+### ZFS Management Examples
+```bash
+# Check ZFS pool health
+curl "http://localhost:8000/api/zfs/pools/cache/health"
+
+# Start pool scrub
+curl -X POST "http://localhost:8000/api/zfs/pools/cache/scrub"
+
+# Create encrypted dataset
+curl -X POST "http://localhost:8000/api/zfs/datasets/cache/secure_data/encryption/create" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "encryption_type": "aes-256-gcm",
+    "key_format": "passphrase",
+    "key_location": "/secure/keyfile"
+  }'
+
+# Set dataset quota
+curl -X POST "http://localhost:8000/api/zfs/datasets/cache/appdata/quota" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "quota_size": "500G"
+  }'
+
+# Create incremental backup
+curl -X POST "http://localhost:8000/api/zfs/datasets/cache/appdata/snapshots/incremental" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "base_snapshot": "backup_20240115_103000",
+    "snapshot_name": "backup_20240115_143000"
+  }'
+
+# Monitor performance
+curl "http://localhost:8000/api/zfs/pools/cache/iostat"
+
+# Check quota alerts
+curl "http://localhost:8000/api/zfs/datasets/cache/appdata/quota/alerts?warning_threshold=80"
+```
+
+### Storage Validation Examples
+```bash
+# Check storage space
+curl "http://localhost:8000/api/hosts/remote-server.local/storage?paths=/mnt/cache,/mnt/user&ssh_user=root"
+
+# Validate storage for migration
+curl -X POST "http://localhost:8000/api/hosts/remote-server.local/storage/validate?ssh_user=root" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "required_space": 100000000000,
+    "target_path": "/mnt/cache",
+    "safety_margin": 0.1
+  }'
+```
+
 ## 🌐 Frontend Development
 
 The web UI is planned for future development. See [frontend/README.md](frontend/README.md) for the roadmap and setup instructions.
@@ -319,6 +470,16 @@ The web UI is planned for future development. See [frontend/README.md](frontend/
 - SSH key management
 - Visual migration planning
 
+**New ZFS Management Features:**
+- ZFS pool health monitoring dashboard
+- Interactive dataset property editor
+- Visual backup strategy planner
+- Real-time performance monitoring charts
+- Storage space validation interface
+- Quota management and alerting dashboard
+- Snapshot timeline visualization
+- Encryption key management interface
+
 ## 📖 Documentation
 
 - [API Documentation](docs/API.md) - Complete API reference with multi-host examples
@@ -330,11 +491,17 @@ The web UI is planned for future development. See [frontend/README.md](frontend/
 Contributions are welcome! Areas needing development:
 
 - **Frontend Implementation** - React/Vue.js web interface with multi-host support
+  - ZFS management dashboard
+  - Storage monitoring interface
+  - Migration performance visualizations
 - **Authentication** - API key or OAuth support
 - **Monitoring** - Prometheus metrics and alerting
 - **Testing** - Unit and integration tests
 - **Docker Support** - Containerized deployment options
 - **Advanced Features** - Scheduled migrations, batch operations, rollback functionality
+- **Enhanced ZFS Features** - Custom retention policies, automated maintenance
+- **Cloud Integration** - AWS, Azure, GCP storage backends
+- **Database Support** - PostgreSQL, MySQL migration optimizations
 
 ## 📄 License
 
@@ -348,4 +515,4 @@ This project is open source. See the repository for license details.
 
 ---
 
-**TransDock v1.0** - Multi-host Docker stack migrations with ZFS snapshots 
+**TransDock v1.0** - Multi-host Docker stack migrations with advanced ZFS management and storage validation 

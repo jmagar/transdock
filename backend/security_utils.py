@@ -168,6 +168,41 @@ class SecurityUtils:
         return normalized_path
 
     @staticmethod
+    def split_wildcard_path(path: str) -> tuple[str, str]:
+        """
+        Safely splits a path containing a wildcard into a base path and the pattern.
+        Example: /home/*/appdata -> ("/home", "*/appdata")
+        """
+        if '*' not in path:
+            raise ValueError("Path does not contain a wildcard.")
+
+        # Sanitize first to prevent tricks like /home/../*/etc/passwd
+        sanitized_path = SecurityUtils.sanitize_path(path, allow_absolute=True)
+
+        parts = sanitized_path.split(os.sep)
+        
+        # Find the first part with a wildcard
+        wildcard_index = -1
+        for i, part in enumerate(parts):
+            if '*' in part:
+                wildcard_index = i
+                break
+        
+        if wildcard_index <= 1 and sanitized_path.startswith('/'):
+            # Avoid overly broad wildcards like /* or /tmp/*
+            raise ValueError(f"Wildcard is too high in the directory structure: {path}")
+        
+        # Reconstruct base path and pattern
+        base_path = os.sep.join(parts[:wildcard_index])
+        pattern = os.sep.join(parts[wildcard_index:])
+        
+        # Final validation on base_path
+        if not base_path or '..' in base_path:
+             raise ValueError(f"Invalid base path derived from wildcard: {path}")
+
+        return base_path if base_path else ".", pattern
+
+    @staticmethod
     def escape_shell_argument(arg: str) -> str:
         """Safely escape shell arguments using shlex.quote."""
         return shlex.quote(str(arg))

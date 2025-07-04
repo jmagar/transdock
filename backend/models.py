@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field, computed_field
 from typing import List, Optional, Dict
 from enum import Enum
+from .utils import format_bytes
 
 
 class TransferMethod(str, Enum):
@@ -23,25 +24,18 @@ class StorageInfo(BaseModel):
     mount_point: str
     
     @computed_field
-    @property
     def total_human(self) -> str:
-        from .utils import format_bytes
         return format_bytes(self.total_bytes)
     
     @computed_field
-    @property
     def used_human(self) -> str:
-        from .utils import format_bytes
         return format_bytes(self.used_bytes)
     
     @computed_field
-    @property
     def available_human(self) -> str:
-        from .utils import format_bytes
         return format_bytes(self.available_bytes)
     
     @computed_field
-    @property
     def usage_percent(self) -> float:
         if self.total_bytes == 0:
             return 0.0
@@ -58,27 +52,19 @@ class StorageValidationResult(BaseModel):
     safety_margin_bytes: int = 0
     
     @computed_field
-    @property
     def required_human(self) -> str:
-        from .utils import format_bytes
         return format_bytes(self.required_bytes)
     
     @computed_field
-    @property
     def available_human(self) -> str:
-        from .utils import format_bytes
         return format_bytes(self.available_bytes)
     
     @computed_field
-    @property
     def safety_margin_human(self) -> str:
-        from .utils import format_bytes
         return format_bytes(self.safety_margin_bytes)
     
     @computed_field
-    @property
     def total_required_human(self) -> str:
-        from .utils import format_bytes
         return format_bytes(self.required_bytes + self.safety_margin_bytes)
 
 
@@ -90,27 +76,19 @@ class MigrationStorageRequirement(BaseModel):
     safety_margin_factor: float = 1.2  # 20% safety margin
     
     @computed_field
-    @property
     def source_size_human(self) -> str:
-        from .utils import format_bytes
         return format_bytes(self.source_size_bytes)
     
     @computed_field
-    @property
     def estimated_transfer_size_human(self) -> str:
-        from .utils import format_bytes
         return format_bytes(self.estimated_transfer_size_bytes)
     
     @computed_field
-    @property
     def zfs_snapshot_overhead_human(self) -> str:
-        from .utils import format_bytes
         return format_bytes(self.zfs_snapshot_overhead_bytes)
     
     @computed_field
-    @property
     def total_requirement_human(self) -> str:
-        from .utils import format_bytes
         total = self.estimated_transfer_size_bytes + self.zfs_snapshot_overhead_bytes
         return format_bytes(total)
 

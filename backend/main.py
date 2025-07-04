@@ -1,15 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import logging
-from typing import Optional
+from typing import Optional, Dict
 from .models import (
     MigrationRequest, MigrationResponse, HostValidationRequest, 
-    HostInfo, HostCapabilities, RemoteStack, StackAnalysis, 
-    StorageValidationResult, MigrationStorageRequirement
+    HostInfo, HostCapabilities, StackAnalysis
 )
 from .migration_service import MigrationService
 from .host_service import HostService
 from .security_utils import SecurityUtils, SecurityValidationError
+from .zfs_ops import ZFSOperations
 from datetime import datetime, timezone
 
 # Configure logging
@@ -35,6 +35,10 @@ app.add_middleware(
 # Initialize services
 migration_service = MigrationService()
 host_service = HostService()
+zfs_service = ZFSOperations()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 @app.get("/")
@@ -76,11 +80,11 @@ async def create_migration(request: MigrationRequest):
         if "Storage validation failed" in error_message:
             raise HTTPException(
                 status_code=422,
-                detail=f"Storage validation failed - {error_message}. Please ensure target system has sufficient disk space.")
+                detail=f"Storage validation failed - {error_message}. Please ensure target system has sufficient disk space.") from e
         elif "Insufficient storage space" in error_message:
             raise HTTPException(
                 status_code=422,
-                detail=f"Insufficient storage space - {error_message}. Free up disk space or choose a different target path.")
+                detail=f"Insufficient storage space - {error_message}. Free up disk space or choose a different target path.") from e
         else:
             raise HTTPException(status_code=400, detail=error_message) from e
 
@@ -254,10 +258,10 @@ async def cleanup_migration(migration_id: str):
         if success:
             return {
                 "success": True,
-                "message": "Migration cleaned up successfully"}
+                "message": "Migration cleanup successful"}
         raise HTTPException(
             status_code=400,
-            detail="Failed to cleanup migration")
+            detail="Failed to clean up migration")
     except SecurityValidationError as e:
         raise HTTPException(
             status_code=422,
@@ -373,8 +377,7 @@ async def start_remote_stack(hostname: str, stack_name: str, compose_path: str, 
         success = await host_service.start_remote_stack(host_info, stack_path)
         if success:
             return {"success": True, "message": f"Stack {stack_name} started successfully"}
-        else:
-            raise HTTPException(status_code=400, detail=f"Failed to start stack {stack_name}")
+        raise HTTPException(status_code=400, detail=f"Failed to start stack {stack_name}")
     except SecurityValidationError as e:
         raise HTTPException(
             status_code=422,
@@ -399,8 +402,7 @@ async def stop_remote_stack(hostname: str, stack_name: str, compose_path: str, s
         success = await host_service.stop_remote_stack(host_info, stack_path)
         if success:
             return {"success": True, "message": f"Stack {stack_name} stopped successfully"}
-        else:
-            raise HTTPException(status_code=400, detail=f"Failed to stop stack {stack_name}")
+        raise HTTPException(status_code=400, detail=f"Failed to stop stack {stack_name}")
     except SecurityValidationError as e:
         raise HTTPException(
             status_code=422,
@@ -426,8 +428,7 @@ async def list_remote_datasets(hostname: str, ssh_user: str = "root", ssh_port: 
         if returncode != 0:
             if "command not found" in stderr or "No such file" in stderr:
                 return {"datasets": [], "error": "ZFS not available on remote host"}
-            else:
-                raise HTTPException(status_code=500, detail=f"Failed to list datasets: {stderr}")
+            raise HTTPException(status_code=500, detail=f"Failed to list datasets: {stderr}")
         
         datasets = []
         for line in stdout.strip().split('\n'):
@@ -508,10 +509,7 @@ async def validate_host_storage(hostname: str, target_path: str, required_bytes:
 async def get_zfs_pool_health(pool_name: str):
     """Get comprehensive health information for a ZFS pool"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
-        
-        health_info = await zfs_ops.get_pool_health(pool_name)
+        health_info = await zfs_service.get_pool_health(pool_name)
         
         if not health_info:
             raise HTTPException(status_code=404, detail="Pool not found or inaccessible")
@@ -527,10 +525,7 @@ async def get_zfs_pool_health(pool_name: str):
 async def get_zfs_pool_status(pool_name: str):
     """Get ZFS pool status"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
-        
-        status = await zfs_ops.get_pool_status(pool_name)
+        status = await zfs_service.get_pool_status(pool_name)
         
         if not status:
             raise HTTPException(status_code=404, detail="Pool not found")
@@ -546,11 +541,8 @@ async def get_zfs_pool_status(pool_name: str):
 async def get_zfs_dataset_properties(dataset_name: str, properties: Optional[str] = None):
     """Get ZFS dataset properties"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
-        
         prop_list = properties.split(",") if properties else None
-        props = await zfs_ops.get_dataset_properties(dataset_name, prop_list)
+        props = await zfs_service.get_dataset_properties(dataset_name, prop_list)
         
         return {"dataset": dataset_name, "properties": props}
     except SecurityValidationError as e:
@@ -563,10 +555,7 @@ async def get_zfs_dataset_properties(dataset_name: str, properties: Optional[str
 async def set_zfs_dataset_property(dataset_name: str, property_name: str, value: str):
     """Set a ZFS dataset property"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
-        
-        success = await zfs_ops.set_dataset_property(dataset_name, property_name, value)
+        success = await zfs_service.set_dataset_property(dataset_name, property_name, value)
         
         if not success:
             raise HTTPException(status_code=400, detail="Failed to set property")
@@ -582,10 +571,7 @@ async def set_zfs_dataset_property(dataset_name: str, property_name: str, value:
 async def get_zfs_dataset_usage(dataset_name: str):
     """Get detailed usage information for a ZFS dataset"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
-        
-        usage = await zfs_ops.get_dataset_usage(dataset_name)
+        usage = await zfs_service.get_dataset_usage(dataset_name)
         
         return {"dataset": dataset_name, "usage": usage}
     except SecurityValidationError as e:
@@ -598,10 +584,7 @@ async def get_zfs_dataset_usage(dataset_name: str):
 async def optimize_zfs_dataset(dataset_name: str, migration_type: str = "docker"):
     """Optimize a ZFS dataset for migration"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
-        
-        success = await zfs_ops.optimize_dataset_for_migration(dataset_name, migration_type)
+        success = await zfs_service.optimize_dataset_for_migration(dataset_name, migration_type)
         
         if not success:
             raise HTTPException(status_code=400, detail="Failed to optimize dataset")
@@ -617,10 +600,7 @@ async def optimize_zfs_dataset(dataset_name: str, migration_type: str = "docker"
 async def get_zfs_dataset_snapshots_detailed(dataset_name: str):
     """Get detailed snapshot information for a ZFS dataset"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
-        
-        snapshots = await zfs_ops.get_dataset_snapshots_detailed(dataset_name)
+        snapshots = await zfs_service.get_dataset_snapshots_detailed(dataset_name)
         
         return {"dataset": dataset_name, "snapshots": snapshots}
     except SecurityValidationError as e:
@@ -631,13 +611,10 @@ async def get_zfs_dataset_snapshots_detailed(dataset_name: str):
 
 @app.post("/api/zfs/datasets/{dataset_name}/snapshots/incremental")
 async def create_incremental_zfs_snapshot(dataset_name: str, base_snapshot: Optional[str] = None, 
-                                         snapshot_name: Optional[str] = None):
+                                          snapshot_name: Optional[str] = None):
     """Create an incremental ZFS snapshot"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
-        
-        result = await zfs_ops.create_incremental_snapshot(dataset_name, base_snapshot, snapshot_name)
+        result = await zfs_service.create_incremental_snapshot(dataset_name, base_snapshot, snapshot_name)
         
         if not result.get("success", False):
             raise HTTPException(status_code=400, detail=result.get("error", "Failed to create snapshot"))
@@ -653,10 +630,7 @@ async def create_incremental_zfs_snapshot(dataset_name: str, base_snapshot: Opti
 async def rollback_zfs_snapshot(snapshot_name: str, force: bool = False):
     """Rollback to a ZFS snapshot"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
-        
-        success = await zfs_ops.rollback_to_snapshot(snapshot_name, force)
+        success = await zfs_service.rollback_to_snapshot(snapshot_name, force)
         
         if not success:
             raise HTTPException(status_code=400, detail="Failed to rollback to snapshot")
@@ -670,13 +644,10 @@ async def rollback_zfs_snapshot(snapshot_name: str, force: bool = False):
 
 @app.post("/api/zfs/datasets/{dataset_name}/snapshots/retention")
 async def apply_zfs_snapshot_retention(dataset_name: str, keep_daily: int = 7, keep_weekly: int = 4, 
-                                      keep_monthly: int = 6, keep_yearly: int = 2):
+                                       keep_monthly: int = 6, keep_yearly: int = 2):
     """Apply retention policy to ZFS snapshots"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
-        
-        result = await zfs_ops.apply_snapshot_retention_policy(
+        result = await zfs_service.apply_snapshot_retention_policy(
             dataset_name, keep_daily, keep_weekly, keep_monthly, keep_yearly
         )
         
@@ -691,11 +662,11 @@ async def apply_zfs_snapshot_retention(dataset_name: str, keep_daily: int = 7, k
 async def get_zfs_iostat(pools: Optional[str] = None, interval: int = 1, count: int = 5):
     """Get ZFS I/O statistics"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
-        
         pool_list = pools.split(",") if pools else None
-        iostat = await zfs_ops.get_zfs_iostat(pool_list, interval, count)
+        iostat = await zfs_service.get_zfs_iostat(pool_list, interval, count)
+        
+        if not iostat:
+            raise HTTPException(status_code=404, detail="Failed to get iostat for specified pools")
         
         return iostat
     except SecurityValidationError as e:
@@ -708,10 +679,10 @@ async def get_zfs_iostat(pools: Optional[str] = None, interval: int = 1, count: 
 async def get_zfs_arc_stats():
     """Get ZFS ARC statistics"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
+        arc_stats = await zfs_service.get_arc_statistics()
         
-        arc_stats = await zfs_ops.get_arc_statistics()
+        if not arc_stats:
+            raise HTTPException(status_code=500, detail="Failed to retrieve ARC statistics")
         
         return {"arc_statistics": arc_stats}
     except Exception as e:
@@ -720,15 +691,12 @@ async def get_zfs_arc_stats():
 
 @app.post("/api/zfs/datasets/{dataset_name}/performance/monitor")
 async def monitor_zfs_dataset_performance(dataset_name: str, duration_seconds: int = 30):
-    """Monitor ZFS dataset performance"""
+    """Monitor ZFS performance for a dataset over a duration"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
-        
-        performance_data = await zfs_ops.monitor_migration_performance(dataset_name, duration_seconds)
+        performance_data = await zfs_service.monitor_migration_performance(dataset_name, duration_seconds)
         
         if not performance_data:
-            raise HTTPException(status_code=400, detail="Failed to monitor performance")
+            raise HTTPException(status_code=404, detail="Failed to monitor performance for the specified dataset")
         
         return performance_data
     except SecurityValidationError as e:
@@ -739,15 +707,12 @@ async def monitor_zfs_dataset_performance(dataset_name: str, duration_seconds: i
 
 @app.post("/api/zfs/pools/{pool_name}/scrub")
 async def start_zfs_pool_scrub(pool_name: str):
-    """Start a ZFS pool scrub"""
+    """Start a scrub operation on a ZFS pool"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
-        
-        success = await zfs_ops.start_pool_scrub(pool_name)
+        success = await zfs_service.start_pool_scrub(pool_name)
         
         if not success:
-            raise HTTPException(status_code=400, detail="Failed to start scrub")
+            raise HTTPException(status_code=400, detail="Failed to start scrub operation")
         
         return {"pool": pool_name, "scrub_started": True}
     except SecurityValidationError as e:
@@ -758,12 +723,12 @@ async def start_zfs_pool_scrub(pool_name: str):
 
 @app.get("/api/zfs/pools/{pool_name}/scrub/status")
 async def get_zfs_pool_scrub_status(pool_name: str):
-    """Get ZFS pool scrub status"""
+    """Get the status of a scrub operation on a ZFS pool"""
     try:
-        from .zfs_ops import ZFSOperations
-        zfs_ops = ZFSOperations()
+        scrub_status = await zfs_service.get_pool_scrub_status(pool_name)
         
-        scrub_status = await zfs_ops.get_pool_scrub_status(pool_name)
+        if "error" in scrub_status:
+            raise HTTPException(status_code=404, detail=scrub_status["error"])
         
         return {"pool": pool_name, "scrub_status": scrub_status}
     except SecurityValidationError as e:

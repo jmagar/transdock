@@ -1,7 +1,10 @@
 import asyncio
 import logging
-from datetime import datetime
+import os
+import re
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Union, Tuple, Any
+from collections import defaultdict
 from .security_utils import SecurityUtils, SecurityValidationError
 from .utils import format_bytes
 
@@ -446,8 +449,8 @@ class ZFSOperations:
         try:
             dataset_name = SecurityUtils.validate_dataset_name(dataset_name)
             
-            # Validate property name (allow alphanumeric, underscore, colon, dash)
-            if not all(c.isalnum() or c in '_:-' for c in property_name):
+            # Validate property name (allow alphanumeric, underscore, colon, dash, and dot)
+            if not all(c.isalnum() or c in '_:.-' for c in property_name):
                 raise SecurityValidationError(f"Invalid property name: {property_name}")
             
             # Validate value (basic validation, ZFS will do more specific validation)
@@ -508,8 +511,10 @@ class ZFSOperations:
             dataset_name = SecurityUtils.validate_dataset_name(dataset_name)
             
             # Get current properties to avoid unnecessary changes
-            current_props = await self.get_dataset_properties(dataset_name, 
-                ["compression", "dedup", "recordsize", "atime", "relatime"])
+            current_props = await self.get_dataset_properties(
+                dataset_name, 
+                ["compression", "dedup", "recordsize", "atime", "relatime"]
+            )
             
             # Define optimization settings based on migration type
             if migration_type == "docker":
@@ -656,9 +661,9 @@ class ZFSOperations:
             if pool_name and pools:
                 # Return single pool status
                 return pools.get(pool_name, {})
-            else:
-                # Return all pools
-                return {"pools": pools}
+
+            # Return all pools
+            return {"pools": pools}
                 
         except SecurityValidationError as e:
             logger.error(f"Security validation failed for get_pool_status: {e}")
@@ -868,31 +873,50 @@ class ZFSOperations:
             logger.error(f"Security validation failed for start_pool_scrub: {e}")
             return False
     
-    async def get_pool_scrub_status(self, pool_name: str) -> Dict[str, Union[str, bool, int]]:
-        """Get the scrub status for a ZFS pool"""
+    async def get_pool_scrub_status(self, pool_name: str) -> Dict[str, Union[str, bool, int, Dict]]:
+        """Get the scrub status for a ZFS pool, including progress and ETA."""
         try:
             pool_name = SecurityUtils.validate_dataset_name(pool_name)
             
-            pool_status = await self.get_pool_status(pool_name)
-            
-            if not pool_status:
+            # Using safe_run_zfs_command to get the raw output
+            returncode, stdout, stderr = await self.safe_run_zfs_command("status", "-v", pool_name)
+            if returncode != 0:
+                logger.error(f"Failed to get pool status for {pool_name}: {stderr}")
                 return {"error": "Could not retrieve pool status"}
-            
-            # Parse scrub information from status
-            scrub_info = {
-                "scrub_in_progress": False,
-                "scrub_completed": False,
-                "last_scrub": "never",
-                "errors_found": 0
+
+            status_text = stdout
+
+            scrub_info: Dict[str, Any] = {
+                "scrub_in_progress": "none",
+                "state": "unknown",
+                "last_scrub_time": "never",
+                "errors": "none"
             }
-            
-            # Extract scrub information from the status output
-            # This is a simplified parser - real implementation would need more robust parsing
-            status_text = str(pool_status)
-            if "scrub in progress" in status_text.lower():
-                scrub_info["scrub_in_progress"] = True
-            elif "scrub repaired" in status_text.lower() or "scrub completed" in status_text.lower():
-                scrub_info["scrub_completed"] = True
+
+            if "scrub in progress" in status_text:
+                scrub_info["state"] = "scrubbing"
+                
+                progress_match = re.search(r"(\d+\.\d+)\% done", status_text)
+                if progress_match:
+                    scrub_info["progress_percent"] = float(progress_match.group(1))
+
+                eta_match = re.search(r"(\d+h\d+m) to go", status_text)
+                if eta_match:
+                    scrub_info["eta"] = eta_match.group(1)
+
+                repaired_match = re.search(r"repaired (\d+)B", status_text)
+                if repaired_match:
+                    scrub_info["repaired_bytes"] = int(repaired_match.group(1))
+
+            elif "scrub repaired" in status_text or "scrub completed" in status_text:
+                scrub_info["state"] = "completed"
+                scan_line_match = re.search(r"scan:.+", status_text)
+                if scan_line_match:
+                    scrub_info["last_scrub_time"] = scan_line_match.group(0)
+
+            errors_match = re.search(r"errors: (.+)", status_text)
+            if errors_match:
+                scrub_info["errors"] = errors_match.group(1)
             
             return scrub_info
             
@@ -961,8 +985,10 @@ class ZFSOperations:
     
     # ===== Advanced Snapshot Management =====
     
-    async def create_incremental_snapshot(self, dataset_name: str, base_snapshot: Optional[str] = None, 
-                                        snapshot_name: Optional[str] = None) -> Dict[str, Union[str, bool]]:
+    async def create_incremental_snapshot(
+        self, dataset_name: str, base_snapshot: Optional[str] = None, 
+        snapshot_name: Optional[str] = None
+    ) -> Dict[str, Union[str, bool]]:
         """Create an incremental snapshot based on a previous snapshot"""
         try:
             dataset_name = SecurityUtils.validate_dataset_name(dataset_name)
@@ -1012,10 +1038,12 @@ class ZFSOperations:
             logger.error(f"Security validation failed for create_incremental_snapshot: {e}")
             return {"success": False, "error": "Security validation failed"}
     
-    async def send_incremental_snapshot(self, dataset_name: str, base_snapshot: str, 
-                                      incremental_snapshot: str, target_host: str, 
-                                      target_dataset: str, ssh_user: str = "root", 
-                                      ssh_port: int = 22) -> bool:
+    async def send_incremental_snapshot(
+        self, dataset_name: str, base_snapshot: str, 
+        incremental_snapshot: str, target_host: str, 
+        target_dataset: str, ssh_user: str = "root", 
+        ssh_port: int = 22
+    ) -> bool:
         """Send an incremental snapshot to a remote system"""
         try:
             # Validate all inputs
@@ -1094,9 +1122,11 @@ class ZFSOperations:
             logger.error(f"Security validation failed for rollback_to_snapshot: {e}")
             return False
     
-    async def apply_snapshot_retention_policy(self, dataset_name: str, 
-                                            keep_daily: int = 7, keep_weekly: int = 4, 
-                                            keep_monthly: int = 6, keep_yearly: int = 2) -> Dict[str, Union[int, List[str]]]:
+    async def apply_snapshot_retention_policy(
+        self, dataset_name: str, 
+        keep_daily: int = 7, keep_weekly: int = 4, 
+        keep_monthly: int = 6, keep_yearly: int = 2
+    ) -> Dict[str, Union[int, List[str]]]:
         """Apply a retention policy to snapshots of a dataset"""
         try:
             dataset_name = SecurityUtils.validate_dataset_name(dataset_name)
@@ -1111,7 +1141,6 @@ class ZFSOperations:
             snapshots.sort(key=lambda x: x.get("creation", ""))
             
             # Group snapshots by time periods
-            now = datetime.now()
             keep_snapshots = set()
             
             # Keep daily snapshots
@@ -1219,28 +1248,44 @@ class ZFSOperations:
             return []
     
     def _group_snapshots_by_period(self, snapshots: List[Dict[str, Any]], period: str) -> List[str]:
-        """Group snapshots by time period and return one representative from each period"""
+        """Group snapshots by period and return the most recent one from each period."""
         if not snapshots:
             return []
+
+        grouped_snapshots = defaultdict(list)
         
-        # This is a simplified implementation
-        # In a real implementation, you'd parse the creation timestamps and group by periods
-        
-        if period == "daily":
-            # For now, just return the last snapshot of each unique day
-            # This would need proper date parsing in a real implementation
-            return [snap["name"] for snap in snapshots[-7:]]  # Keep last 7 snapshots as daily
-        elif period == "weekly":
-            # Return weekly representatives
-            return [snap["name"] for snap in snapshots[::7]]  # Every 7th snapshot
-        elif period == "monthly":
-            # Return monthly representatives  
-            return [snap["name"] for snap in snapshots[::30]]  # Every 30th snapshot
-        elif period == "yearly":
-            # Return yearly representatives
-            return [snap["name"] for snap in snapshots[::365]]  # Every 365th snapshot
-        
-        return []
+        for snapshot in snapshots:
+            try:
+                # The creation time from `zfs list` can have variable spacing.
+                # A more robust solution would be to get raw timestamps (`zfs get -p creation`).
+                creation_str = snapshot.get("creation", "")
+                creation_time = datetime.strptime(creation_str, "%a %b %d %H:%M %Y")
+            except (ValueError, KeyError):
+                logger.warning(f"Could not parse creation date '{snapshot.get('creation')}' for snapshot {snapshot['name']}. Skipping.")
+                continue
+
+            if period == "daily":
+                group_key = creation_time.date()
+            elif period == "weekly":
+                group_key = (creation_time.isocalendar().year, creation_time.isocalendar().week)
+            elif period == "monthly":
+                group_key = (creation_time.year, creation_time.month)
+            elif period == "yearly":
+                group_key = creation_time.year
+            else:
+                continue
+            
+            grouped_snapshots[group_key].append(snapshot)
+
+        # The input snapshots are sorted newest first, so the first in each group is the one to keep.
+        kept_snapshots = []
+        for group_key, snaps_in_group in grouped_snapshots.items():
+            # Sort again to be certain, as the primary source of sorting is outside this function.
+            snaps_in_group.sort(key=lambda s: datetime.strptime(s.get("creation", ""), "%a %b %d %H:%M %Y"), reverse=True)
+            if snaps_in_group:
+                kept_snapshots.append(snaps_in_group[0]['name'])
+
+        return kept_snapshots
     
     # ===== ZFS Performance Monitoring =====
     
@@ -1348,48 +1393,53 @@ class ZFSOperations:
         except SecurityValidationError as e:
             logger.error(f"Security validation failed for monitor_migration_performance: {e}")
             return {}
-    
-    async def get_arc_statistics(self) -> Dict[str, Union[str, int]]:
+
+    def _parse_arc_stats(self, arc_stats_output: str) -> Dict[str, Union[str, int, float]]:
+        """Helper to parse ARC statistics from /proc/spl/kstat/zfs/arcstats."""
+        arc_stats: Dict[str, Union[str, int, float]] = {}
+        for line in arc_stats_output.strip().split('\n'):
+            if not line.strip() or line.startswith('#'):
+                continue
+            
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+
+            stat_name, _, stat_value = parts[0], parts[1], parts[2]
+
+            if stat_name in ["size", "c", "c_max", "c_min", "mfu_size", "mru_size", "meta_size"]:
+                try:
+                    bytes_value = int(stat_value)
+                    arc_stats[stat_name] = bytes_value
+                    arc_stats[f"{stat_name}_human"] = format_bytes(bytes_value)
+                except ValueError:
+                    arc_stats[stat_name] = stat_value
+            else:
+                try:
+                    arc_stats[stat_name] = int(stat_value)
+                except ValueError:
+                    arc_stats[stat_name] = stat_value
+
+        hits = arc_stats.get("hits", 0)
+        misses = arc_stats.get("misses", 0)
+
+        if isinstance(hits, int) and isinstance(misses, int):
+            total_requests = hits + misses
+            if total_requests > 0:
+                hit_ratio = (hits / total_requests) * 100
+                arc_stats["hit_ratio_percent"] = round(hit_ratio, 2)
+        
+        return arc_stats
+
+    async def get_arc_statistics(self) -> Dict[str, Union[str, int, float]]:
         """Get ZFS ARC (Adaptive Replacement Cache) statistics"""
         try:
-            # Read ARC stats from /proc/spl/kstat/zfs/arcstats
             returncode, stdout, stderr = await self.run_command(["cat", "/proc/spl/kstat/zfs/arcstats"])
-            
             if returncode != 0:
                 logger.error(f"Failed to read ARC statistics: {stderr}")
                 return {}
             
-            # Parse ARC statistics
-            arc_stats = {}
-            for line in stdout.strip().split('\n'):
-                if line.strip() and not line.startswith('#'):
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        stat_name = parts[0]
-                        stat_value = parts[2]
-                        
-                        # Convert to human-readable format for size stats
-                        if stat_name in ["size", "c", "c_max", "c_min", "mfu_size", "mru_size", "meta_size"]:
-                            try:
-                                bytes_value = int(stat_value)
-                                arc_stats[stat_name] = bytes_value
-                                arc_stats[f"{stat_name}_human"] = format_bytes(bytes_value)
-                            except ValueError:
-                                arc_stats[stat_name] = stat_value
-                        else:
-                            try:
-                                arc_stats[stat_name] = int(stat_value)
-                            except ValueError:
-                                arc_stats[stat_name] = stat_value
-            
-            # Calculate hit ratio
-            if "hits" in arc_stats and "misses" in arc_stats:
-                total_requests = arc_stats["hits"] + arc_stats["misses"]
-                if total_requests > 0:
-                    hit_ratio = (arc_stats["hits"] / total_requests) * 100
-                    arc_stats["hit_ratio_percent"] = round(hit_ratio, 2)
-            
-            return arc_stats
+            return self._parse_arc_stats(stdout)
             
         except Exception as e:
             logger.error(f"Failed to get ARC statistics: {e}")
@@ -1517,6 +1567,80 @@ class ZFSOperations:
         except SecurityValidationError as e:
             logger.error(f"Security validation failed for create_backup_strategy: {e}")
             return {"success": False, "error": "Security validation failed"}
+
+    async def _execute_full_backup(self, dataset_name: str, timestamp: str) -> Dict[str, Any]:
+        """Helper to execute a full backup."""
+        snapshot_name = f"backup_full_{timestamp}"
+        success = await self.create_snapshot(dataset_name, snapshot_name)
+        if not success:
+            return {"success": False, "error": "Failed to create full backup snapshot"}
+
+        full_snapshot_name = f"{dataset_name}@{snapshot_name}"
+        actions = [f"Created full backup: {full_snapshot_name}"]
+
+        bookmark_success = await self.create_snapshot_bookmark(full_snapshot_name, f"{snapshot_name}_bookmark")
+        if bookmark_success:
+            actions.append(f"Created bookmark: {dataset_name}#{snapshot_name}_bookmark")
+        
+        return {"success": True, "executed_actions": actions}
+
+    async def _execute_incremental_backup(self, dataset_name: str, base_snapshot: str, timestamp: str) -> Dict[str, Any]:
+        """Helper to execute an incremental backup."""
+        if not base_snapshot:
+            return {"success": False, "error": "No base snapshot available for incremental backup"}
+
+        snapshot_name = f"backup_incr_{timestamp}"
+        result = await self.create_incremental_snapshot(dataset_name, base_snapshot, snapshot_name)
+        
+        if not (isinstance(result, dict) and result.get("success")):
+            error_msg = result.get("error", "Unknown error") if isinstance(result, dict) else "Failed to create incremental backup"
+            return {"success": False, "error": f"Failed to create incremental backup: {error_msg}"}
+
+        snapshot_full_name = result.get("snapshot_name", "")
+        if not (isinstance(snapshot_full_name, str) and snapshot_full_name):
+             return {"success": False, "error": "Incremental snapshot name not returned."}
+
+        actions = [f"Created incremental backup: {snapshot_full_name}"]
+        bookmark_success = await self.create_snapshot_bookmark(snapshot_full_name, f"{snapshot_name}_bookmark")
+        if bookmark_success:
+            actions.append(f"Created bookmark: {dataset_name}#{snapshot_name}_bookmark")
+
+        return {"success": True, "executed_actions": actions}
+
+    async def _execute_differential_backup(self, dataset_name: str, base_full: str, timestamp: str) -> Dict[str, Any]:
+        """Helper to execute a differential backup."""
+        snapshot_name = f"backup_diff_{timestamp}"
+        success = await self.create_snapshot(dataset_name, snapshot_name)
+        if not success:
+            return {"success": False, "error": "Failed to create differential backup snapshot"}
+
+        full_snapshot_name = f"{dataset_name}@{snapshot_name}"
+        actions = [f"Created differential backup: {full_snapshot_name} (based on {base_full})"]
+
+        bookmark_success = await self.create_snapshot_bookmark(full_snapshot_name, f"{snapshot_name}_bookmark")
+        if bookmark_success:
+            actions.append(f"Created bookmark: {dataset_name}#{snapshot_name}_bookmark")
+
+        return {"success": True, "executed_actions": actions}
+
+    async def _apply_retention_cleanup(self, dataset_name: str, retention_policy: Dict[str, int]) -> Dict[str, Any]:
+        """Helper to apply retention policy and clean up old snapshots."""
+        cleanup_result = await self.apply_snapshot_retention_policy(
+            dataset_name,
+            retention_policy.get("daily", 7),
+            retention_policy.get("weekly", 4),
+            retention_policy.get("monthly", 6),
+            retention_policy.get("yearly", 2)
+        )
+        
+        deleted_count = cleanup_result.get("deleted", 0)
+        if not (isinstance(cleanup_result, dict) and isinstance(deleted_count, int) and deleted_count > 0):
+            return {}
+
+        return {
+            "executed_actions": [f"Cleaned up {deleted_count} old snapshots"],
+            "cleanup_result": cleanup_result
+        }
     
     async def execute_backup_plan(self, dataset_name: str, backup_strategy: Dict[str, Union[str, Dict]], 
                                 target_location: Optional[str] = None) -> Dict[str, Union[str, bool, List]]:
@@ -1524,103 +1648,38 @@ class ZFSOperations:
         try:
             dataset_name = SecurityUtils.validate_dataset_name(dataset_name)
             
-            # Ensure strategy is a dictionary
-            if isinstance(backup_strategy, dict):
-                strategy = backup_strategy.get("strategy", backup_strategy)
-                if not isinstance(strategy, dict):
-                    strategy = backup_strategy
-            else:
+            strategy = backup_strategy.get("strategy", backup_strategy) if isinstance(backup_strategy, dict) else backup_strategy
+            if not isinstance(strategy, dict):
                 return {"success": False, "error": "Invalid backup strategy format"}
             
+            results: Dict[str, Any] = { "dataset": dataset_name, "executed_actions": [], "success": True, "errors": [] }
             next_action = strategy.get("next_action", "")
-            
-            results = {
-                "dataset": dataset_name,
-                "executed_actions": [],
-                "success": True,
-                "errors": []
-            }
-            
-            # Execute the main backup action
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_result = {}
+
             if next_action == "create_full_backup":
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                snapshot_name = f"backup_full_{timestamp}"
-                
-                success = await self.create_snapshot(dataset_name, snapshot_name)
-                if success:
-                    full_snapshot_name = f"{dataset_name}@{snapshot_name}"
-                    results["executed_actions"].append(f"Created full backup: {full_snapshot_name}")
-                    
-                    # Create bookmark for efficient replication
-                    bookmark_success = await self.create_snapshot_bookmark(full_snapshot_name, f"{snapshot_name}_bookmark")
-                    if bookmark_success is True:
-                        results["executed_actions"].append(f"Created bookmark: {dataset_name}#{snapshot_name}_bookmark")
-                else:
-                    results["success"] = False
-                    results["errors"].append("Failed to create full backup snapshot")
-                    
+                backup_result = await self._execute_full_backup(dataset_name, timestamp)
             elif next_action == "create_incremental_backup":
                 base_snapshot = strategy.get("latest_snapshot", "")
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                snapshot_name = f"backup_incr_{timestamp}"
-                
-                if isinstance(base_snapshot, str) and base_snapshot:
-                    result = await self.create_incremental_snapshot(dataset_name, base_snapshot, snapshot_name)
-                    if isinstance(result, dict) and result.get("success"):
-                        snapshot_full_name = result.get("snapshot_name", "")
-                        if isinstance(snapshot_full_name, str) and snapshot_full_name:
-                            results["executed_actions"].append(f"Created incremental backup: {snapshot_full_name}")
-                            
-                            # Create bookmark
-                            bookmark_success = await self.create_snapshot_bookmark(snapshot_full_name, f"{snapshot_name}_bookmark")
-                            if bookmark_success is True:
-                                results["executed_actions"].append(f"Created bookmark: {dataset_name}#{snapshot_name}_bookmark")
-                    else:
-                        results["success"] = False
-                        error_msg = result.get("error", "Unknown error") if isinstance(result, dict) else "Failed to create incremental backup"
-                        results["errors"].append(f"Failed to create incremental backup: {error_msg}")
-                else:
-                    results["success"] = False
-                    results["errors"].append("No base snapshot available for incremental backup")
-            
+                backup_result = await self._execute_incremental_backup(dataset_name, base_snapshot, timestamp)
             elif next_action == "create_differential_backup":
                 base_full = strategy.get("base_full_snapshot", "")
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                snapshot_name = f"backup_diff_{timestamp}"
-                
-                # For differential, we create a snapshot and then send it based on the full backup
-                success = await self.create_snapshot(dataset_name, snapshot_name)
-                if success:
-                    full_snapshot_name = f"{dataset_name}@{snapshot_name}"
-                    results["executed_actions"].append(f"Created differential backup: {full_snapshot_name} (based on {base_full})")
-                    
-                    # Create bookmark
-                    bookmark_success = await self.create_snapshot_bookmark(full_snapshot_name, f"{snapshot_name}_bookmark")
-                    if bookmark_success is True:
-                        results["executed_actions"].append(f"Created bookmark: {dataset_name}#{snapshot_name}_bookmark")
-                else:
-                    results["success"] = False
-                    results["errors"].append("Failed to create differential backup snapshot")
-            
-            # Apply retention policy if needed
-            if strategy.get("cleanup_needed", False):
+                backup_result = await self._execute_differential_backup(dataset_name, base_full, timestamp)
+
+            if backup_result.get("success"):
+                results["executed_actions"].extend(backup_result.get("executed_actions", []))
+            else:
+                results["success"] = False
+                results["errors"].append(backup_result.get("error", "Unknown backup error"))
+
+            if results["success"] and strategy.get("cleanup_needed", False):
                 retention_policy = strategy.get("retention_policy", {})
                 if isinstance(retention_policy, dict):
-                    cleanup_result = await self.apply_snapshot_retention_policy(
-                        dataset_name,
-                        retention_policy.get("daily", 7),
-                        retention_policy.get("weekly", 4),
-                        retention_policy.get("monthly", 6),
-                        retention_policy.get("yearly", 2)
-                    )
-                    
-                    if isinstance(cleanup_result, dict):
-                        deleted_count = cleanup_result.get("deleted", 0)
-                        if isinstance(deleted_count, int) and deleted_count > 0:
-                            results["executed_actions"].append(f"Cleaned up {deleted_count} old snapshots")
-                            results["cleanup_result"] = cleanup_result
+                    cleanup_actions = await self._apply_retention_cleanup(dataset_name, retention_policy)
+                    if cleanup_actions:
+                        results["executed_actions"].extend(cleanup_actions.get("executed_actions", []))
+                        results["cleanup_result"] = cleanup_actions.get("cleanup_result")
             
-            # If target location specified, initiate send operation
             if target_location and results["success"]:
                 results["executed_actions"].append(f"Backup plan ready for replication to {target_location}")
                 results["replication_ready"] = True
@@ -1632,105 +1691,85 @@ class ZFSOperations:
         except SecurityValidationError as e:
             logger.error(f"Security validation failed for execute_backup_plan: {e}")
             return {"success": False, "error": "Security validation failed"}
-    
+
+    async def _restore_via_clone(self, backup_snapshot: str, target_dataset: str) -> Dict[str, Any]:
+        """Helper to restore a backup via cloning."""
+        returncode, _, stderr = await self.safe_run_zfs_command("clone", backup_snapshot, target_dataset)
+        if returncode != 0:
+            return {"success": False, "error": f"Failed to create clone: {stderr}"}
+        
+        logger.info(f"Successfully cloned {backup_snapshot} to {target_dataset}")
+        return {"success": True, "action": f"Created clone {target_dataset} from backup {backup_snapshot}"}
+
+    async def _restore_via_rollback(self, backup_snapshot: str, source_dataset: str) -> Dict[str, Any]:
+        """Helper to restore a backup via rollback."""
+        success = await self.rollback_to_snapshot(backup_snapshot, force=True)
+        if not success:
+            return {"success": False, "error": "Failed to rollback to backup snapshot"}
+
+        logger.info(f"Successfully rolled back {source_dataset} to {backup_snapshot}")
+        return {"success": True, "action": f"Rolled back {source_dataset} to backup {backup_snapshot}"}
+
+    async def _restore_via_send_receive(self, backup_snapshot: str, target_dataset: str) -> Dict[str, Any]:
+        """Helper to restore a backup via send/receive."""
+        returncode, _, stderr = await self.safe_run_zfs_command("create", target_dataset)
+        if returncode != 0 and "dataset already exists" not in stderr:
+            return {"success": False, "error": f"Failed to create target dataset: {stderr}"}
+
+        zfs_send_cmd = SecurityUtils.validate_zfs_command_args("send", backup_snapshot)
+        zfs_receive_cmd = SecurityUtils.validate_zfs_command_args("receive", "-F", target_dataset)
+        
+        cmd = ["sh", "-c", f"{' '.join(zfs_send_cmd)} | {' '.join(zfs_receive_cmd)}"]
+        
+        returncode, _, stderr = await self.run_command(cmd)
+        if returncode != 0:
+            return {"success": False, "error": f"Failed to send/receive backup: {stderr}"}
+
+        logger.info(f"Successfully restored {backup_snapshot} to {target_dataset}")
+        return {"success": True, "action": f"Restored {backup_snapshot} to {target_dataset} via send/receive"}
+
     async def restore_from_backup(self, backup_snapshot: str, target_dataset: Optional[str] = None, 
                                 restore_type: str = "clone") -> Dict[str, Union[str, bool]]:
-        """Restore data from a backup snapshot"""
+        """Restore data from a backup snapshot using a strategy pattern."""
         try:
-            # Validate snapshot name
             if '@' not in backup_snapshot:
-                raise SecurityValidationError("Invalid snapshot name format")
+                raise SecurityValidationError("Invalid snapshot name format. Expected 'pool/dataset@snapshot'.")
             
-            source_dataset = backup_snapshot.split('@')[0]
-            snapshot_suffix = backup_snapshot.split('@')[1]
+            source_dataset = SecurityUtils.validate_dataset_name(backup_snapshot.split('@')[0])
             
-            # Validate dataset names
-            source_dataset = SecurityUtils.validate_dataset_name(source_dataset)
-            
-            if target_dataset:
-                target_dataset = SecurityUtils.validate_dataset_name(target_dataset)
-            else:
-                # Create a restore target name
+            if not target_dataset:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 target_dataset = f"{source_dataset}_restore_{timestamp}"
-            
-            # Check if snapshot exists
+            else:
+                target_dataset = SecurityUtils.validate_dataset_name(target_dataset)
+
             returncode, _, _ = await self.safe_run_zfs_command("list", "-H", "-t", "snapshot", backup_snapshot)
             if returncode != 0:
-                return {"success": False, "error": f"Backup snapshot {backup_snapshot} not found"}
-            
-            result = {
-                "backup_snapshot": backup_snapshot,
-                "target_dataset": target_dataset,
-                "restore_type": restore_type,
-                "success": False
+                return {"success": False, "error": f"Backup snapshot '{backup_snapshot}' not found."}
+
+            restore_handlers = {
+                "clone": lambda: self._restore_via_clone(backup_snapshot, target_dataset),
+                "rollback": lambda: self._restore_via_rollback(backup_snapshot, source_dataset),
+                "send_receive": lambda: self._restore_via_send_receive(backup_snapshot, target_dataset)
             }
+
+            if restore_type not in restore_handlers:
+                return {"success": False, "error": f"Invalid restore type: {restore_type}"}
             
-            if restore_type == "clone":
-                # Create a clone from the snapshot
-                returncode, _, stderr = await self.safe_run_zfs_command("clone", backup_snapshot, target_dataset)
-                
-                if returncode != 0:
-                    result["error"] = f"Failed to create clone: {stderr}"
-                    return result
-                
-                result["success"] = True
-                result["action"] = f"Created clone {target_dataset} from backup {backup_snapshot}"
-                logger.info(f"Successfully cloned {backup_snapshot} to {target_dataset}")
-                
-            elif restore_type == "rollback":
-                # Rollback the original dataset to the backup snapshot
-                success = await self.rollback_to_snapshot(backup_snapshot, force=True)
-                
-                if not success:
-                    result["error"] = "Failed to rollback to backup snapshot"
-                    return result
-                
-                result["success"] = True
-                result["action"] = f"Rolled back {source_dataset} to backup {backup_snapshot}"
-                result["target_dataset"] = source_dataset  # Target is the same as source for rollback
-                logger.info(f"Successfully rolled back {source_dataset} to {backup_snapshot}")
-                
-            elif restore_type == "send_receive":
-                # Send the snapshot to a new location (requires target location)
-                if not target_dataset or target_dataset == source_dataset:
-                    result["error"] = "Target dataset must be different from source for send_receive restore"
-                    return result
-                
-                # Create the target dataset first
-                returncode, _, stderr = await self.safe_run_zfs_command("create", target_dataset)
-                if returncode != 0 and "dataset already exists" not in stderr:
-                    result["error"] = f"Failed to create target dataset: {stderr}"
-                    return result
-                
-                # Send the snapshot
-                zfs_send_cmd = SecurityUtils.validate_zfs_command_args("send", backup_snapshot)
-                zfs_receive_cmd = SecurityUtils.validate_zfs_command_args("receive", "-F", target_dataset)
-                
-                cmd = [
-                    "sh", "-c",
-                    f"{' '.join(zfs_send_cmd)} | {' '.join(zfs_receive_cmd)}"
-                ]
-                
-                returncode, _, stderr = await self.run_command(cmd)
-                
-                if returncode != 0:
-                    result["error"] = f"Failed to send/receive backup: {stderr}"
-                    return result
-                
-                result["success"] = True
-                result["action"] = f"Restored {backup_snapshot} to {target_dataset} via send/receive"
-                logger.info(f"Successfully restored {backup_snapshot} to {target_dataset}")
+            result = await restore_handlers[restore_type]()
             
-            else:
-                result["error"] = f"Invalid restore type: {restore_type}. Must be 'clone', 'rollback', or 'send_receive'"
-                return result
-            
-            return result
+            return {
+                "backup_snapshot": backup_snapshot,
+                "target_dataset": target_dataset if restore_type != "rollback" else source_dataset,
+                "restore_type": restore_type,
+                "success": result.get("success", False),
+                "action": result.get("action", ""),
+                "error": result.get("error", "")
+            }
             
         except SecurityValidationError as e:
             logger.error(f"Security validation failed for restore_from_backup: {e}")
-            return {"success": False, "error": "Security validation failed"}
+            return {"success": False, "error": f"Security validation failed: {str(e)}"}
     
     async def verify_backup_integrity(self, backup_snapshot: str) -> Dict[str, Union[str, bool, int]]:
         """Verify the integrity of a backup snapshot"""
@@ -1834,13 +1873,13 @@ class ZFSOperations:
             
         except SecurityValidationError as e:
             logger.error(f"Security validation failed for verify_backup_integrity: {e}")
-            return {"overall_status": "failed", "error": "Security validation failed"}
+            return {"success": False, "error": "Security validation failed"}
     
     # ===== ZFS Encryption Support =====
     
     async def create_encrypted_dataset(self, dataset_name: str, encryption_type: str = "aes-256-gcm", 
                                      key_format: str = "passphrase", key_location: Optional[str] = None) -> Dict[str, Union[str, bool]]:
-        """Create a new encrypted ZFS dataset"""
+        """Create an encrypted ZFS dataset"""
         try:
             dataset_name = SecurityUtils.validate_dataset_name(dataset_name)
             
@@ -2115,7 +2154,7 @@ class ZFSOperations:
             return {"success": False, "error": "Security validation failed"}
     
     async def get_quota_usage(self, dataset_name: str) -> Dict[str, Union[str, bool, int, Dict]]:
-        """Get quota and reservation usage for a dataset"""
+        """Get quota and reservation usage for a ZFS dataset"""
         try:
             dataset_name = SecurityUtils.validate_dataset_name(dataset_name)
             
@@ -2172,7 +2211,7 @@ class ZFSOperations:
     
     async def manage_quota_alerts(self, dataset_name: str, warning_threshold: int = 80, 
                                 critical_threshold: int = 95) -> Dict[str, Union[str, bool, List, Dict]]:
-        """Check quota usage and generate alerts if thresholds are exceeded"""
+        """Manage quota alerts based on usage thresholds"""
         try:
             dataset_name = SecurityUtils.validate_dataset_name(dataset_name)
             
