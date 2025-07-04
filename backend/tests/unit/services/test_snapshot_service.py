@@ -87,11 +87,11 @@ class TestSnapshotService:
         with patch.object(snapshot_service, 'get_snapshot') as mock_get:
             mock_get.return_value = Result.success(sample_snapshot)
             
-            result = await snapshot_service.create_snapshot("pool1/dataset1@snap1", recursive=False)
+            result = await snapshot_service.create_snapshot("pool1/dataset1", "snap1", recursive=False)
             
             assert result.is_success
             assert result.value.name == "pool1/dataset1@snap1"
-            mock_executor.execute_zfs.assert_called_once_with("snapshot", "pool1/dataset1@snap1")
+            mock_executor.execute_zfs.assert_called_once_with("snapshot", "pool1/dataset1", "snap1")
     
     @pytest.mark.asyncio
     async def test_create_snapshot_recursive(self, snapshot_service, mock_executor, sample_snapshot):
