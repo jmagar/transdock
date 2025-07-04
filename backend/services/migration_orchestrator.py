@@ -55,7 +55,7 @@ class MigrationOrchestrator:
         """Cancel a running migration"""
         async with self._migration_lock:
             if migration_id not in self.active_migrations:
-                raise KeyError("Migration not found")
+                return False
             
             status = self.active_migrations[migration_id]
             

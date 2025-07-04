@@ -100,12 +100,12 @@ class MigrationService:
     # === Container Discovery and Analysis (delegated to ContainerDiscoveryService) ===
     
     async def discover_containers(self, 
-                                container_identifier: str,
-                                identifier_type: IdentifierType,
-                                label_filters: Optional[Dict[str, str]] = None,
-                                source_host: Optional[str] = None,
-                                source_ssh_user: str = "root",
-                                source_ssh_port: int = 22) -> ContainerDiscoveryResult:
+                                  container_identifier: str,
+                                  identifier_type: IdentifierType,
+                                  label_filters: Optional[Dict[str, str]] = None,
+                                  source_host: Optional[str] = None,
+                                  source_ssh_user: str = "root",
+                                  source_ssh_port: int = 22) -> ContainerDiscoveryResult:
         """Discover containers for migration"""
         return await self.discovery_service.discover_containers(
             container_identifier, identifier_type, label_filters,
@@ -113,10 +113,10 @@ class MigrationService:
         )
     
     async def analyze_containers_for_migration(self,
-                                             container_identifier: str,
-                                             identifier_type: IdentifierType,
-                                             label_filters: Optional[Dict[str, str]] = None,
-                                             source_host: Optional[str] = None) -> ContainerAnalysis:
+                                               container_identifier: str,
+                                               identifier_type: IdentifierType,
+                                               label_filters: Optional[Dict[str, str]] = None,
+                                               source_host: Optional[str] = None) -> ContainerAnalysis:
         """Analyze containers to provide migration insights"""
         return await self.discovery_service.analyze_containers_for_migration(
             container_identifier, identifier_type, label_filters, source_host
