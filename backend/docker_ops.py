@@ -394,7 +394,7 @@ class DockerOperations:
                 'internal': network_info.internal
             }
             
-            created_network = client.networks.create(**network_config)
+            client.networks.create(**network_config)
             logger.info(f"Created network {network_info.name} on {target_host}")
             
             client.close()
