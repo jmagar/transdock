@@ -214,7 +214,7 @@ pool1/dataset1@snap2\t2000000\t1640995300\tsnapshot"""
         assert result.value[0].name == "pool1/dataset1@snap1"
         assert result.value[1].name == "pool1/dataset1@snap2"
         mock_executor.execute_zfs.assert_called_once_with(
-            "list", "-H", "-t", "snapshot", "-o", "name,used,creation,type"
+            "list", "-H", "-t", "snapshot", "-o", "name,used,referenced,creation,clones"
         )
     
     @pytest.mark.asyncio
