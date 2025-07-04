@@ -1,5 +1,5 @@
 import logging
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 import docker
 from docker.errors import DockerException, NotFound

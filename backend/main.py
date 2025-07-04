@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional
 from .models import (
     MigrationRequest, MigrationResponse, HostValidationRequest, 
     HostCapabilities, ContainerMigrationRequest,

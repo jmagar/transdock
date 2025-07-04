@@ -17,7 +17,7 @@ import asyncio
 import logging
 from typing import Dict, List, Any, Optional
 from .models import (
-    MigrationRequest, ContainerMigrationRequest, MigrationStatus, MigrationResponse,
+    MigrationRequest, ContainerMigrationRequest, MigrationStatus,
     ContainerDiscoveryResult, ContainerAnalysis, IdentifierType
 )
 from .docker_ops import DockerOperations
