@@ -63,7 +63,12 @@ class DockerOperations:
         if hasattr(self, 'client'):
             try:
                 self.client.close()
-            except:
+            except (OSError, ConnectionError, RuntimeError, AttributeError, DockerException) as e:
+                # Silently handle connection cleanup errors during destruction
+                # OSError/ConnectionError: Network/socket issues during close
+                # RuntimeError: Client in invalid state
+                # AttributeError: Client object malformed or partially initialized
+                # DockerException: Docker-specific errors during cleanup
                 pass
     
     def get_docker_client(self, host: Optional[str] = None, ssh_user: str = "root", ssh_port: int = 22) -> docker.DockerClient:
