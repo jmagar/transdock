@@ -302,7 +302,7 @@ class MigrationService:
             
             # Step 1: Check if containers are running
             logger.info(f"Checking container status on {request.target_host}")
-            docker_ps_cmd = ["docker", "ps", "--format", "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"]
+            docker_ps_cmd = ["docker", "ps", "--format", "table {{.Names}}\t{{.Status}}\t{{.Ports}}"]
             docker_ps_cmd_str = " ".join(docker_ps_cmd)
             
             ssh_cmd = SecurityUtils.build_ssh_command(
