@@ -160,7 +160,9 @@ class ContainerMigrationService:
                 request.target_host, request.ssh_user, request.ssh_port
             )
             source_has_zfs = request.source_host is None or await self.zfs_ops.check_remote_zfs(
-                request.source_host or "localhost"
+                request.source_host or "localhost",
+                request.source_ssh_user,
+                request.source_ssh_port
             )
 
             use_zfs = target_has_zfs and source_has_zfs and not request.force_rsync
