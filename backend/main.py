@@ -7,7 +7,7 @@ from .models import (
     HostInfo, HostCapabilities, StackAnalysis, ContainerMigrationRequest,
     ContainerDiscoveryResult, ContainerAnalysis, IdentifierType
 )
-from .migration_service import MigrationService
+from .migration_service_refactored import MigrationService
 from .host_service import HostService
 from .security_utils import SecurityUtils, SecurityValidationError
 from .zfs_ops import ZFSOperations
