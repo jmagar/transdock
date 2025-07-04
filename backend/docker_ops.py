@@ -228,10 +228,11 @@ class DockerOperations:
                                   host: Optional[str] = None,
                                   ssh_user: str = "root") -> List[VolumeMount]:
         """Extract volume mounts from container information"""
-        client = self.get_docker_client(host, ssh_user)
+        client = None
         volume_mounts = []
         
         try:
+            client = self.get_docker_client(host, ssh_user)
             for mount in container_info.mounts:
                 if mount['Type'] == 'bind':
                     volume_mount = VolumeMount(
@@ -255,7 +256,7 @@ class DockerOperations:
             
         finally:
             # Clean up remote client
-            if host:
+            if host and client:
                 client.close()
     
     async def get_project_networks(self, project_name: str,
@@ -411,6 +412,7 @@ class DockerOperations:
                                           volume_mapping: Dict[str, str], target_host: str,
                                           ssh_user: str = "root", ssh_port: int = 22) -> bool:
         """Recreate containers on target host with updated volume paths using Docker API"""
+        client = None
         try:
             client = self.get_docker_client(target_host, ssh_user)
             success_count = 0
@@ -427,15 +429,19 @@ class DockerOperations:
                     
                 except DockerException as e:
                     logger.error(f"Failed to recreate container {container_info.name}: {e}")
-                    client.close()
+                    if client:
+                        client.close()
                     return False
             
             logger.info(f"Successfully recreated {success_count} containers on {target_host}")
-            client.close()
+            if client:
+                client.close()
             return True
             
         except Exception as e:
             logger.error(f"Failed to recreate containers on target: {e}")
+            if client:
+                client.close()
             return False
     
     def _build_container_config(self, container_info: ContainerInfo, 
@@ -510,6 +516,7 @@ class DockerOperations:
                                           target_host: str, ssh_user: str = "root", 
                                           ssh_port: int = 22) -> bool:
         """Connect container to additional networks on target host using Docker API"""
+        client = None
         try:
             client = self.get_docker_client(target_host, ssh_user)
             
@@ -527,39 +534,47 @@ class DockerOperations:
                     logger.info(f"Connected {container_name} to network {network_name}")
                 except NotFound as e:
                     logger.error(f"Network {network_name} or container {container_name} not found: {e}")
-                    client.close()
+                    if client:
+                        client.close()
                     return False
                 except DockerException as e:
                     logger.error(f"Failed to connect {container_name} to network {network_name}: {e}")
-                    client.close()
+                    if client:
+                        client.close()
                     return False
             
-            client.close()
+            if client:
+                client.close()
             return True
             
         except Exception as e:
             logger.error(f"Failed to connect container to networks: {e}")
+            if client:
+                client.close()
             return False
     
     async def get_container_by_name(self, name: str,
                                   host: Optional[str] = None,
                                   ssh_user: str = "root") -> Optional[ContainerInfo]:
         """Get container information by exact name"""
+        client = None
         try:
             client = self.get_docker_client(host, ssh_user)
             container = client.containers.get(name)
             container_info = self._extract_container_info(container)
             
             # Clean up remote client
-            if host:
+            if host and client:
                 client.close()
             
             return container_info
         except NotFound:
-            if host:
+            if host and client:
                 client.close()
             return None
         except DockerException as e:
+            if host and client:
+                client.close()
             logger.error(f"Failed to get container {name}: {e}")
             raise
     
