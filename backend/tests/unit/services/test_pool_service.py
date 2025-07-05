@@ -1,11 +1,9 @@
 import pytest
 import asyncio
 from unittest.mock import Mock, AsyncMock, patch
-from datetime import datetime, timedelta
 
 from backend.zfs_operations.services.pool_service import PoolService
 from backend.zfs_operations.core.entities.pool import Pool, PoolState, VDev
-from backend.zfs_operations.core.entities.vdev import Vdev
 from backend.zfs_operations.core.value_objects.size_value import SizeValue
 from backend.zfs_operations.core.exceptions.zfs_exceptions import (
     PoolException,

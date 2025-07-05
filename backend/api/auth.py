@@ -9,6 +9,7 @@ This module provides comprehensive JWT-based authentication including:
 """
 
 import secrets
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Set
 from passlib.context import CryptContext
@@ -31,6 +32,40 @@ REFRESH_TOKEN_EXPIRE_DAYS = 7
 
 # Password context for hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def get_default_password(env_var: str, username: str) -> str:
+    """
+    Get default password from environment variable.
+    
+    Args:
+        env_var: Environment variable name
+        username: Username for error messages
+        
+    Returns:
+        str: Password from environment variable
+        
+    Raises:
+        RuntimeError: If environment variable is not set
+    """
+    password = os.getenv(env_var)
+    if not password:
+        error_msg = (
+            f"Environment variable '{env_var}' not set. "
+            f"Please set a secure password for the default '{username}' user. "
+            f"Example: export {env_var}='your_secure_password'"
+        )
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+    
+    if len(password) < 8:
+        error_msg = (
+            f"Password in environment variable '{env_var}' is too short. "
+            f"Please use a password with at least 8 characters for security."
+        )
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+    
+    return password
 
 class TokenBlacklist:
     """
@@ -152,7 +187,7 @@ token_blacklist = TokenBlacklist()
 USERS_DB = {
     "admin": {
         "username": "admin",
-        "hashed_password": pwd_context.hash("admin123"),  # Default password
+        "hashed_password": pwd_context.hash(get_default_password("TRANSDOCK_ADMIN_PASSWORD", "admin")),
         "email": "admin@transdock.local",
         "full_name": "System Administrator",
         "roles": ["admin", "user"],
@@ -162,7 +197,7 @@ USERS_DB = {
     },
     "user": {
         "username": "user",
-        "hashed_password": pwd_context.hash("user123"),  # Default password
+        "hashed_password": pwd_context.hash(get_default_password("TRANSDOCK_USER_PASSWORD", "user")),
         "email": "user@transdock.local",
         "full_name": "Standard User",
         "roles": ["user"],
@@ -626,10 +661,28 @@ def initialize_default_users():
     """Initialize default users if they don't exist"""
     try:
         logger.info("Initializing default users...")
+        
+        # Check if environment variables are set
+        required_env_vars = ["TRANSDOCK_ADMIN_PASSWORD", "TRANSDOCK_USER_PASSWORD"]
+        missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+        
+        if missing_vars:
+            error_msg = (
+                f"Missing required environment variables: {', '.join(missing_vars)}. "
+                f"Please set secure passwords for default users. "
+                f"Example: export TRANSDOCK_ADMIN_PASSWORD='your_secure_admin_password' && "
+                f"export TRANSDOCK_USER_PASSWORD='your_secure_user_password'"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+        
         # Users are already initialized in USERS_DB
         logger.info("Default users initialized successfully")
+        logger.info("Admin and user accounts are available with environment-configured passwords")
+        
     except Exception as e:
         logger.error(f"Failed to initialize default users: {e}")
+        raise RuntimeError(f"Cannot start application without secure default user passwords: {e}") from e
 
 # Initialize on module load
 initialize_default_users() 

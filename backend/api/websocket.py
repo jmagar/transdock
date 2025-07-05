@@ -13,7 +13,7 @@ import json
 import asyncio
 import uuid
 from typing import Dict, List, Any, Optional, Set
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.routing import APIRouter
@@ -57,7 +57,7 @@ class WebSocketMessage(BaseModel):
     """WebSocket message model"""
     event_type: EventType
     data: Dict[str, Any]
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     message_id: str = Field(default_factory=lambda: f"msg_{uuid.uuid4().hex}")
     user_id: Optional[str] = None
 
@@ -107,7 +107,7 @@ class ConnectionManager:
                     data={
                         "user": user.username,
                         "connection_id": connection_id,
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.now(timezone.utc).isoformat()
                     },
                     user_id=user.username
                 )
@@ -441,7 +441,7 @@ async def handle_client_message(connection_id: str, message: Dict[str, Any], use
                 connection_id,
                 WebSocketMessage(
                     event_type=EventType.INFO,
-                    data={"message": "pong", "timestamp": datetime.utcnow().isoformat()}
+                    data={"message": "pong", "timestamp": datetime.now(timezone.utc).isoformat()}
                 )
             )
         
@@ -474,7 +474,7 @@ async def send_system_status(connection_id: str):
         status_data = {
             "system": {
                 "status": "operational",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "uptime": "system_uptime_placeholder"  # TODO: Implement actual uptime
             },
             "websocket": connection_info,
@@ -506,7 +506,7 @@ async def emit_migration_progress(migration_id: str, progress: int, status: str,
             "progress": progress,
             "status": status,
             "details": details,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     )
 
@@ -514,7 +514,7 @@ async def emit_zfs_event(event_type: EventType, dataset_name: str, details: Opti
     """Emit ZFS-related event"""
     data = {
         "dataset_name": dataset_name,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
     if details is not None:
         data.update(details)
@@ -526,7 +526,7 @@ async def emit_system_alert(level: str, message: str, details: Optional[Dict[str
     data = {
         "level": level,
         "message": message,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
     if details is not None:
         data.update(details)

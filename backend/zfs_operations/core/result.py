@@ -104,14 +104,13 @@ class Result(Generic[T, E]):
                 'value': self._value,
                 'error': None
             }
-        else:
-            error = cast(E, self._error)
-            error_dict = getattr(error, 'to_dict', lambda: str(error))()
-            return {
-                'success': False,
-                'value': None,
-                'error': error_dict
-            }
+        error = cast(E, self._error)
+        error_dict = getattr(error, 'to_dict', lambda: str(error))()
+        return {
+            'success': False,
+            'value': None,
+            'error': error_dict
+        }
     
     def __bool__(self) -> bool:
         """Result is truthy if successful"""

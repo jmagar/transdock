@@ -285,5 +285,24 @@ class SecurityValidator(ISecurityValidator):
         if not pool_name or not isinstance(pool_name, str):
             raise SecurityValidationError("Pool name cannot be empty or non-string")
         
-        # Use same validation as dataset name for consistency
-        return self.validate_dataset_name(pool_name)
+        # Length check
+        if len(pool_name) > 64:
+            raise SecurityValidationError("Pool name too long (max 64 characters)")
+        
+        # Check for dangerous patterns
+        for pattern in self._dangerous_patterns:
+            if re.search(pattern, pool_name):
+                raise SecurityValidationError(f"Pool name contains dangerous characters: {pool_name}")
+        
+        # Pool name format validation using pool-specific pattern (no slashes allowed)
+        if not self._pool_name_pattern.match(pool_name):
+            raise SecurityValidationError(f"Invalid pool name format: {pool_name}")
+        
+        # Additional security checks for pool names
+        if pool_name.startswith('.') or pool_name.endswith('.'):
+            raise SecurityValidationError("Pool name cannot start or end with '.'")
+        
+        if pool_name.startswith('-') or pool_name.endswith('-'):
+            raise SecurityValidationError("Pool name cannot start or end with '-'")
+        
+        return pool_name
