@@ -222,14 +222,14 @@ class DockerOperations:
         except Exception as e:
             logger.error(f"Failed to extract container info for {container.name}: {e}")
             raise
-    
+
     async def get_container_volumes(self, container_info: ContainerInfo,
                                   host: Optional[str] = None,
                                   ssh_user: str = "root") -> List[VolumeMount]:
         """Extract volume mounts from container information"""
         client = None
         volume_mounts = []
-        
+
         try:
             client = self.get_docker_client(host, ssh_user)
             for mount in container_info.mounts:
@@ -321,8 +321,8 @@ class DockerOperations:
                     logger.warning(f"Container {container_info.name} not found (may have been removed)")
                 except Exception as e:
                     logger.error(f"Failed to stop container {container_info.name}: {e}")
-                    return False
-            
+            return False
+
             logger.info(f"Successfully stopped {stopped_count} containers on {host or 'localhost'}")
             
             # Clean up remote client
@@ -330,11 +330,11 @@ class DockerOperations:
                 client.close()
             
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to stop containers: {e}")
             return False
-    
+
     async def remove_containers(self, container_infos: List[ContainerInfo], 
                               force: bool = False,
                               host: Optional[str] = None,
@@ -354,8 +354,8 @@ class DockerOperations:
                     logger.warning(f"Container {container_info.name} not found (already removed)")
                 except Exception as e:
                     logger.error(f"Failed to remove container {container_info.name}: {e}")
-                    return False
-            
+            return False
+
             logger.info(f"Successfully removed {removed_count} containers on {host or 'localhost'}")
             
             # Clean up remote client
@@ -367,7 +367,7 @@ class DockerOperations:
         except Exception as e:
             logger.error(f"Failed to remove containers: {e}")
             return False
-    
+
     async def create_network_on_target(self, network_info: NetworkInfo, target_host: str, 
                                      ssh_user: str = "root", ssh_port: int = 22) -> bool:
         """Create a Docker network on the target host using Docker API"""
@@ -379,7 +379,7 @@ class DockerOperations:
                 client.networks.get(network_info.name)
                 logger.info(f"Network {network_info.name} already exists on {target_host}")
                 client.close()
-                return True
+        return True
             except NotFound:
                 pass  # Network doesn't exist, create it
             
@@ -406,7 +406,7 @@ class DockerOperations:
         except Exception as e:
             logger.error(f"Failed to create network on target: {e}")
             return False
-    
+
     async def recreate_containers_on_target(self, container_infos: List[ContainerInfo], 
                                           volume_mapping: Dict[str, str], target_host: str,
                                           ssh_user: str = "root", ssh_port: int = 22) -> bool:
@@ -436,13 +436,13 @@ class DockerOperations:
             if client:
                 client.close()
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to recreate containers on target: {e}")
             if client:
                 client.close()
             return False
-    
+
     def _build_container_config(self, container_info: ContainerInfo, 
                                volume_mapping: Dict[str, str]) -> Dict[str, Any]:
         """Build container configuration for Docker API"""
@@ -551,7 +551,7 @@ class DockerOperations:
             if client:
                 client.close()
             return False
-    
+
     async def get_container_by_name(self, name: str,
                                   host: Optional[str] = None,
                                   ssh_user: str = "root") -> Optional[ContainerInfo]:

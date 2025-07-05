@@ -16,6 +16,7 @@ dependencies = [
     "passlib>=1.7.4",
     "python-jose>=3.5.0",
     "python-dotenv>=1.0.0",
+    "docker==7.1.0",
 ]
 authors = [
     {name = "jmagar", email = "jmagar@users.noreply.github.com"}
