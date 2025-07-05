@@ -41,11 +41,11 @@ async def create_dataset(
             detail=f"Failed to create dataset: {result.error}"
         )
     except ValidationException as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except ZFSException as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
 
 
 @router.get("/", response_model=DatasetListResponse)
@@ -69,11 +69,11 @@ async def list_datasets(
             detail=f"Failed to list datasets: {result.error}"
         )
     except ValidationException as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except ZFSException as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
 
 
 @router.get("/{dataset_name}", response_model=DatasetResponse)
@@ -96,11 +96,11 @@ async def get_dataset(
             detail=f"Dataset not found: {result.error}"
         )
     except ValidationException as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except ZFSException as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
 
 
 @router.delete("/{dataset_name}", response_model=APIResponse)
@@ -125,11 +125,11 @@ async def delete_dataset(
             detail=f"Failed to delete dataset: {result.error}"
         )
     except ValidationException as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except ZFSException as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
 
 
 @router.put("/{dataset_name}/properties", response_model=APIResponse)
@@ -155,11 +155,11 @@ async def set_dataset_property(
             detail=f"Failed to set property: {result.error}"
         )
     except ValidationException as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except ZFSException as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
 
 
 @router.get("/{dataset_name}/usage", response_model=APIResponse)
@@ -182,11 +182,11 @@ async def get_dataset_usage(
             detail=f"Failed to get usage: {result.error}"
         )
     except ValidationException as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except ZFSException as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
 
 
 @router.post("/{dataset_name}/mount", response_model=APIResponse)
@@ -209,11 +209,11 @@ async def mount_dataset(
             detail=f"Failed to mount dataset: {result.error}"
         )
     except ValidationException as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except ZFSException as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
 
 
 @router.post("/{dataset_name}/unmount", response_model=APIResponse)
@@ -237,8 +237,8 @@ async def unmount_dataset(
             detail=f"Failed to unmount dataset: {result.error}"
         )
     except ValidationException as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except ZFSException as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e 

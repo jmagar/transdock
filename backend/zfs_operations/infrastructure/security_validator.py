@@ -15,8 +15,8 @@ class SecurityValidator(ISecurityValidator):
     """Concrete implementation of security validator with comprehensive validation rules."""
     
     def __init__(self):
-        # Dataset name validation patterns
-        self._dataset_name_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_\-\.]*(?:/[a-zA-Z0-9][a-zA-Z0-9_\-\.]*)*$')
+        # Dataset name validation patterns - allow spaces in dataset names
+        self._dataset_name_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_\-\. ]*(?:/[a-zA-Z0-9][a-zA-Z0-9_\-\. ]*)*$')
         self._pool_name_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_\-\.]*$')
         
         # Hostname validation
@@ -276,7 +276,7 @@ class SecurityValidator(ISecurityValidator):
                 validated_name, validated_value = self.validate_zfs_property(property_name, value)
                 validated_properties[validated_name] = validated_value
             except Exception as e:
-                raise SecurityValidationError(f"Property validation failed for {property_name}: {str(e)}")
+                raise SecurityValidationError(f"Property validation failed for {property_name}: {str(e)}") from e
         
         return validated_properties
     

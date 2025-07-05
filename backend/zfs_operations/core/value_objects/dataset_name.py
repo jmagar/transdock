@@ -20,8 +20,11 @@ class DatasetName:
         
         # Validate path components
         for part in self.path:
-            if not part.replace('_', '').replace('-', '').replace('.', '').isalnum():
-                raise ValueError("Dataset path components must contain only alphanumeric characters, hyphens, underscores, and dots")
+            # Allow alphanumeric characters, hyphens, underscores, dots, and spaces
+            # Remove these allowed characters and check if anything suspicious remains
+            sanitized = part.replace('_', '').replace('-', '').replace('.', '').replace(' ', '')
+            if not sanitized.isalnum():
+                raise ValueError("Dataset path components must contain only alphanumeric characters, hyphens, underscores, dots, and spaces")
     
     @classmethod
     def from_string(cls, dataset_str: str) -> 'DatasetName':
