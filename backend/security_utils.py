@@ -30,7 +30,7 @@ class SecurityUtils:
     # Regex patterns for validation
     HOSTNAME_PATTERN = re.compile(r'^[a-zA-Z0-9.-]+$')
     USERNAME_PATTERN = re.compile(r'^[a-zA-Z0-9._-]+$')
-    DATASET_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9/_.-]+$')
+    DATASET_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9/_. -]+$')
 
     @staticmethod
     def validate_hostname(hostname: str) -> str:
