@@ -321,7 +321,7 @@ class DockerOperations:
                     logger.warning(f"Container {container_info.name} not found (may have been removed)")
                 except Exception as e:
                     logger.error(f"Failed to stop container {container_info.name}: {e}")
-            return False
+                    continue
 
             logger.info(f"Successfully stopped {stopped_count} containers on {host or 'localhost'}")
             
@@ -354,7 +354,7 @@ class DockerOperations:
                     logger.warning(f"Container {container_info.name} not found (already removed)")
                 except Exception as e:
                     logger.error(f"Failed to remove container {container_info.name}: {e}")
-            return False
+                    continue
 
             logger.info(f"Successfully removed {removed_count} containers on {host or 'localhost'}")
             
@@ -379,7 +379,7 @@ class DockerOperations:
                 client.networks.get(network_info.name)
                 logger.info(f"Network {network_info.name} already exists on {target_host}")
                 client.close()
-        return True
+                return True
             except NotFound:
                 pass  # Network doesn't exist, create it
             
@@ -640,3 +640,65 @@ class DockerOperations:
         except Exception as e:
             logger.error(f"Failed to validate Docker on target: {e}")
             return False
+
+    async def find_compose_file(self, project_path: str) -> Optional[str]:
+        """Find a Docker Compose file in the given directory"""
+        import os
+        compose_files = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']
+        
+        for compose_file in compose_files:
+            full_path = os.path.join(project_path, compose_file)
+            if os.path.exists(full_path):
+                return full_path
+        
+        return None
+
+    async def parse_compose_file(self, compose_file_path: str) -> Dict[str, Any]:
+        """Parse a Docker Compose file and return its contents"""
+        import yaml
+        
+        try:
+            with open(compose_file_path, 'r') as f:
+                return yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.error(f"Failed to parse compose file {compose_file_path}: {e}")
+            return {}
+
+    async def extract_volume_mounts(self, compose_data: Dict[str, Any]) -> List[VolumeMount]:
+        """Extract volume mounts from parsed compose data"""
+        import os
+        volumes = []
+        
+        services = compose_data.get('services', {})
+        for service_name, service_config in services.items():
+            service_volumes = service_config.get('volumes', [])
+            
+            for volume in service_volumes:
+                if isinstance(volume, str):
+                    # Handle string format: "host_path:container_path"
+                    if ':' in volume:
+                        parts = volume.split(':')
+                        if len(parts) >= 2:
+                            host_path = parts[0]
+                            container_path = parts[1]
+                            
+                            # Expand relative paths to absolute
+                            if not os.path.isabs(host_path):
+                                compose_dir = os.path.dirname(os.path.abspath(compose_data.get('_compose_file_path', '')))
+                                host_path = os.path.join(compose_dir, host_path)
+                            
+                            volumes.append(VolumeMount(source=host_path, target=container_path))
+                
+                elif isinstance(volume, dict):
+                    # Handle dictionary format: {"source": "host_path", "target": "container_path"}
+                    source = volume.get('source', '')
+                    target = volume.get('target', '')
+                    
+                    if source and target:
+                        if not os.path.isabs(source):
+                            compose_dir = os.path.dirname(os.path.abspath(compose_data.get('_compose_file_path', '')))
+                            source = os.path.join(compose_dir, source)
+                        
+                        volumes.append(VolumeMount(source=source, target=target))
+        
+        return volumes

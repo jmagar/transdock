@@ -107,6 +107,7 @@ class MigrationService:
                                   source_ssh_user: str = "root",
                                   source_ssh_port: int = 22) -> ContainerDiscoveryResult:
         """Discover containers for migration"""
+        # Note: discovery service doesn't use ssh_port, so we ignore it
         return await self.discovery_service.discover_containers(
             container_identifier, identifier_type, label_filters,
             source_host, source_ssh_user

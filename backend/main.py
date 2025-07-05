@@ -917,7 +917,8 @@ async def smart_migration(
                 target_base_path=target_base_path,
                 ssh_user=ssh_user,
                 ssh_port=ssh_port,
-                force_rsync=force_rsync
+                force_rsync=force_rsync,
+                source_host=None  # Local source
             )
             
             migration_id = await migration_service.start_migration(compose_request)
@@ -956,7 +957,7 @@ async def smart_migration(
                     "migration_type": "container_fallback", 
                     "message": f"⚠️  Found {container_count} running container(s) with '{identifier}', but no compose project",
                     "suggestion": f"Consider using container migration endpoint instead, or check if '{identifier}' is a compose project",
-                    "containers_found": [{"name": c.name, "id": c.id} for c in containers.containers],
+                    "containers_found": [{"name": c["name"], "id": c["id"]} for c in containers.containers],
                     "recommendations": [
                         f"For complete stack migration, look for compose project in {compose_base_path}",
                         f"For individual containers, use /migrations/containers endpoint",
@@ -1281,7 +1282,8 @@ async def start_compose_migration(
             target_base_path=target_base_path,
             ssh_user=ssh_user,
             ssh_port=ssh_port,
-            force_rsync=force_rsync
+            force_rsync=force_rsync,
+            source_host=None  # Local source
         )
         
         migration_id = await migration_service.start_migration(legacy_request)
@@ -1309,7 +1311,7 @@ async def validate_migration_before_start(
     target_path: str,
     ssh_user: str = "root",
     ssh_port: int = 22,
-    compose_base_path: str = None
+    compose_base_path: Optional[str] = None
 ):
     """
     🛡️ VALIDATE MIGRATION TARGET BEFORE STARTING
@@ -1466,8 +1468,12 @@ async def validate_migration_target(
         
         # 🔍 CHECK 4: Storage Space Validation
         try:
-            storage_info = await host_service.get_storage_info(target_host, target_path, ssh_user, ssh_port)
-            available_bytes = storage_info.get("available_bytes", 0)
+            # Create HostInfo object for the call
+            from .models import HostInfo
+            target_host_info = HostInfo(hostname=target_host, ssh_user=ssh_user, ssh_port=ssh_port)
+            storage_results = await host_service.get_storage_info(target_host_info, [target_path])
+            storage_info = storage_results[0] if storage_results else None
+            available_bytes = storage_info.available_bytes if storage_info else 0
             available_gb = round(available_bytes / (1024**3), 2)
             
             validation_results["available_space_gb"] = available_gb
