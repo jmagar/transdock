@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, computed_field
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any, Union
 from enum import Enum
 from .utils import format_bytes
 
@@ -7,6 +7,12 @@ from .utils import format_bytes
 class TransferMethod(str, Enum):
     ZFS_SEND = "zfs_send"
     RSYNC = "rsync"
+
+
+class IdentifierType(str, Enum):
+    PROJECT = "project"
+    NAME = "name" 
+    LABELS = "labels"
 
 
 class HostInfo(BaseModel):
@@ -112,6 +118,26 @@ class RemoteStack(BaseModel):
     status: str = "unknown"  # running, stopped, partial, unknown
 
 
+class ContainerMigrationRequest(BaseModel):
+    """Request model for container-based migration"""
+    # Container identification
+    container_identifier: str = Field(..., description="Container name, project name, or label selector")
+    identifier_type: IdentifierType = Field(..., description="Type of identifier: project, name, or labels")
+    label_filters: Optional[Dict[str, str]] = Field(None, description="Label filters when using labels identifier type")
+    
+    # Source host information (None for local)
+    source_host: Optional[str] = Field(None, description="Source machine hostname or IP (None for local)")
+    source_ssh_user: str = Field(default="root", description="SSH username for source machine")
+    source_ssh_port: int = Field(default=22, description="SSH port for source machine")
+    
+    # Target host information  
+    target_host: str = Field(..., description="Target machine hostname or IP")
+    target_base_path: str = Field(..., description="Target base folder for data")
+    ssh_user: str = Field(default="root", description="SSH username for target machine")
+    ssh_port: int = Field(default=22, description="SSH port for target machine")
+    force_rsync: bool = Field(default=False, description="Force rsync even if target has ZFS")
+
+
 class MigrationRequest(BaseModel):
     # Source host information
     source_host: Optional[str] = Field(None, description="Source machine hostname or IP (None for local)")
@@ -143,6 +169,37 @@ class VolumeMount(BaseModel):
     is_dataset: bool = False
 
 
+class ContainerDiscoveryResult(BaseModel):
+    """Result of container discovery operation"""
+    containers: List[Dict[str, Any]]
+    total_containers: int
+    discovery_method: str
+    query: str
+
+
+class ContainerSummary(BaseModel):
+    """Summary information about discovered containers"""
+    id: str
+    name: str
+    image: str
+    state: str
+    status: str
+    project_name: Optional[str] = None
+    service_name: Optional[str] = None
+    volume_count: int = 0
+    network_count: int = 0
+    port_count: int = 0
+
+
+class NetworkSummary(BaseModel):
+    """Summary of Docker network information"""
+    id: str
+    name: str
+    driver: str
+    scope: str
+    project_name: Optional[str] = None
+
+
 class MigrationStatus(BaseModel):
     id: str
     status: str
@@ -163,6 +220,9 @@ class MigrationStatus(BaseModel):
     # Storage validation information
     storage_validation_results: Optional[Dict[str, StorageValidationResult]] = None
     estimated_storage_requirement: Optional[MigrationStorageRequirement] = None
+    # Container-specific information
+    containers: Optional[List[Dict[str, Any]]] = None
+    networks: Optional[List[Dict[str, Any]]] = None
 
 
 class MigrationResponse(BaseModel):
@@ -182,6 +242,18 @@ class StackAnalysis(BaseModel):
     estimated_size: Optional[int] = None
     zfs_compatible: bool = False
     storage_requirement: Optional[MigrationStorageRequirement] = None
+
+
+class ContainerAnalysis(BaseModel):
+    """Analysis of containers for migration"""
+    containers: List[ContainerSummary]
+    networks: List[NetworkSummary]
+    total_volumes: int
+    total_bind_mounts: int
+    estimated_data_size: Optional[int] = None
+    migration_complexity: str = "simple"  # simple, medium, complex
+    warnings: List[str] = []
+    recommendations: List[str] = []
 
 
 class HostValidationRequest(BaseModel):

@@ -4,7 +4,7 @@ import os
 import re
 import shlex
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from urllib.parse import unquote
 
 
@@ -168,7 +168,7 @@ class SecurityUtils:
         return normalized_path
 
     @staticmethod
-    def split_wildcard_path(path: str) -> tuple[str, str]:
+    def split_wildcard_path(path: str) -> Tuple[str, str]:
         """
         Safely splits a path containing a wildcard into a base path and the pattern.
         Example: /home/*/appdata -> ("/home", "*/appdata")
