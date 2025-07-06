@@ -1,3 +1,4 @@
+import asyncio
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -572,4 +573,261 @@ class DatasetService:
             return Result.failure(DatasetException(
                 f"Failed to parse usage info: {str(e)}",
                 error_code="DATASET_USAGE_PARSE_FAILED"
-            )) 
+            ))
+    
+    # === Additional methods for router compatibility ===
+    
+    async def monitor_dataset_performance(self, 
+                                       name: DatasetName, 
+                                       duration_seconds: int = 30) -> Result[Dict[str, Any], DatasetException]:
+        """Monitor performance metrics for a dataset over the specified duration."""
+        try:
+            self._logger.info(f"Starting performance monitoring for dataset: {name} (duration: {duration_seconds}s)")
+            
+            # Validate dataset name
+            validation_result = await self._validate_dataset_name(name)
+            if validation_result.is_failure:
+                return Result.failure(validation_result.error)
+            
+            # Get initial metrics
+            initial_usage = await self.get_usage(name)
+            if initial_usage.is_failure:
+                return Result.failure(initial_usage.error)
+            
+            initial_iostats = await self._get_dataset_iostats(name)
+            if initial_iostats.is_failure:
+                return Result.failure(initial_iostats.error)
+            
+            start_time = datetime.now()
+            
+            # Wait for the specified duration
+            await asyncio.sleep(duration_seconds)
+            
+            # Get final metrics
+            final_usage = await self.get_usage(name)
+            if final_usage.is_failure:
+                return Result.failure(final_usage.error)
+            
+            final_iostats = await self._get_dataset_iostats(name)
+            if final_iostats.is_failure:
+                return Result.failure(final_iostats.error)
+            
+            end_time = datetime.now()
+            actual_duration = (end_time - start_time).total_seconds()
+            
+            # Calculate performance deltas
+            performance_metrics = await self._calculate_performance_deltas(
+                initial_iostats.value, final_iostats.value, actual_duration
+            )
+            
+            performance_data = {
+                "dataset": str(name),
+                "start_time": start_time.isoformat(),
+                "end_time": end_time.isoformat(),
+                "duration_seconds": actual_duration,
+                "initial_usage": initial_usage.value,
+                "final_usage": final_usage.value,
+                "performance_metrics": performance_metrics
+            }
+            
+            self._logger.info(f"Successfully completed performance monitoring for dataset: {name}")
+            return Result.success(performance_data)
+            
+        except Exception as e:
+            self._logger.error(f"Unexpected error monitoring dataset performance {name}: {e}")
+            return Result.failure(DatasetException(
+                f"Unexpected error: {str(e)}",
+                error_code="DATASET_PERFORMANCE_MONITOR_UNEXPECTED_ERROR"
+            ))
+    
+    async def _get_dataset_iostats(self, name: DatasetName) -> Result[Dict[str, int], DatasetException]:
+        """Get I/O statistics for a dataset from /proc/spl/kstat/zfs/*/objset-*"""
+        try:
+            # Try to get dataset object ID first
+            result = await self._executor.execute_zfs("list", "-H", "-o", "name,objsetid", str(name))
+            
+            if not result.success:
+                return Result.failure(DatasetException(
+                    f"Failed to get dataset objsetid: {result.stderr}",
+                    error_code="DATASET_OBJSETID_FAILED"
+                ))
+            
+            lines = result.stdout.strip().split('\n')
+            if not lines or not lines[0].strip():
+                return Result.failure(DatasetException(
+                    "Empty objsetid output",
+                    error_code="DATASET_OBJSETID_EMPTY"
+                ))
+            
+            parts = lines[0].split('\t')
+            if len(parts) < 2:
+                # If objsetid is not available, return basic I/O stats from pool iostat
+                return await self._get_pool_iostats_for_dataset(name)
+            
+            objsetid = parts[1]
+            
+            # Read kstat data for the specific objset
+            kstat_result = await self._executor.execute_system("find", "/proc/spl/kstat/zfs", "-name", f"objset-{objsetid}")
+            
+            if not kstat_result.success or not kstat_result.stdout.strip():
+                # Fallback to pool-level stats
+                return await self._get_pool_iostats_for_dataset(name)
+            
+            kstat_file = kstat_result.stdout.strip().split('\n')[0]
+            
+            # Read the kstat file
+            cat_result = await self._executor.execute_system("cat", kstat_file)
+            
+            if not cat_result.success:
+                return await self._get_pool_iostats_for_dataset(name)
+            
+            # Parse kstat data
+            iostats = self._parse_kstat_data(cat_result.stdout)
+            return Result.success(iostats)
+            
+        except Exception as e:
+            self._logger.warning(f"Failed to get detailed iostats for {name}, using fallback: {e}")
+            return await self._get_pool_iostats_for_dataset(name)
+    
+    async def _get_pool_iostats_for_dataset(self, name: DatasetName) -> Result[Dict[str, int], DatasetException]:
+        """Fallback method to get pool-level I/O stats when dataset-specific stats are unavailable"""
+        try:
+            # Extract pool name from dataset name
+            pool_name = str(name).split('/')[0]
+            
+            # Get pool iostat
+            result = await self._executor.execute_system("zpool", "iostat", "-v", pool_name, "1", "1")
+            
+            if not result.success:
+                # Return zero stats as last resort
+                return Result.success({
+                    "reads": 0,
+                    "writes": 0,
+                    "read_bytes": 0,
+                    "write_bytes": 0
+                })
+            
+            # Parse basic pool iostat (simplified parsing)
+            iostats = {
+                "reads": 0,
+                "writes": 0, 
+                "read_bytes": 0,
+                "write_bytes": 0
+            }
+            
+            lines = result.stdout.strip().split('\n')
+            for line in lines:
+                if pool_name in line and not line.strip().startswith('pool'):
+                    parts = line.split()
+                    if len(parts) >= 7:
+                        try:
+                            iostats["reads"] = int(float(parts[3]))
+                            iostats["writes"] = int(float(parts[4]))
+                            # Convert bandwidth to bytes (assuming K/M/G suffixes)
+                            iostats["read_bytes"] = self._parse_bandwidth_to_bytes(parts[5])
+                            iostats["write_bytes"] = self._parse_bandwidth_to_bytes(parts[6])
+                        except (ValueError, IndexError):
+                            pass
+                        break
+            
+            return Result.success(iostats)
+            
+        except Exception as e:
+            return Result.failure(DatasetException(
+                f"Failed to get pool iostats: {str(e)}",
+                error_code="DATASET_POOL_IOSTATS_FAILED"
+            ))
+    
+    def _parse_kstat_data(self, kstat_output: str) -> Dict[str, int]:
+        """Parse ZFS kstat data for I/O statistics"""
+        iostats = {
+            "reads": 0,
+            "writes": 0,
+            "read_bytes": 0,
+            "write_bytes": 0
+        }
+        
+        try:
+            for line in kstat_output.strip().split('\n'):
+                if line.strip() and not line.startswith('#'):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        key = parts[0]
+                        value = int(parts[2]) if parts[2].isdigit() else 0
+                        
+                        if key == "reads":
+                            iostats["reads"] = value
+                        elif key == "writes":
+                            iostats["writes"] = value
+                        elif key == "nread":
+                            iostats["read_bytes"] = value
+                        elif key == "nwritten":
+                            iostats["write_bytes"] = value
+        except Exception:
+            pass  # Return zeros on parse error
+        
+        return iostats
+    
+    def _parse_bandwidth_to_bytes(self, bandwidth_str: str) -> int:
+        """Parse bandwidth string (e.g., '1.2M', '500K') to bytes per second"""
+        try:
+            bandwidth_str = bandwidth_str.strip()
+            if not bandwidth_str or bandwidth_str == '-':
+                return 0
+            
+            # Extract numeric part and suffix
+            import re
+            match = re.match(r'^(\d+(?:\.\d+)?)\s*([KMGT]?)$', bandwidth_str.upper())
+            if not match:
+                return int(float(bandwidth_str))
+            
+            value = float(match.group(1))
+            suffix = match.group(2)
+            
+            multipliers = {'K': 1024, 'M': 1024**2, 'G': 1024**3, 'T': 1024**4}
+            multiplier = multipliers.get(suffix, 1)
+            
+            return int(value * multiplier)
+        except:
+            return 0
+    
+    async def _calculate_performance_deltas(self, 
+                                          initial_stats: Dict[str, int], 
+                                          final_stats: Dict[str, int], 
+                                          duration_seconds: float) -> Dict[str, float]:
+        """Calculate performance deltas and rates from initial and final statistics"""
+        try:
+            # Calculate deltas
+            read_ops_delta = final_stats.get("reads", 0) - initial_stats.get("reads", 0)
+            write_ops_delta = final_stats.get("writes", 0) - initial_stats.get("writes", 0)
+            read_bytes_delta = final_stats.get("read_bytes", 0) - initial_stats.get("read_bytes", 0)
+            write_bytes_delta = final_stats.get("write_bytes", 0) - initial_stats.get("write_bytes", 0)
+            
+            # Calculate rates (per second)
+            duration = max(duration_seconds, 1.0)  # Avoid division by zero
+            
+            performance_metrics = {
+                "read_ops_per_second": read_ops_delta / duration,
+                "write_ops_per_second": write_ops_delta / duration,
+                "read_bandwidth_bytes_per_second": read_bytes_delta / duration,
+                "write_bandwidth_bytes_per_second": write_bytes_delta / duration,
+                "total_read_ops": read_ops_delta,
+                "total_write_ops": write_ops_delta,
+                "total_read_bytes": read_bytes_delta,
+                "total_write_bytes": write_bytes_delta
+            }
+            
+            return performance_metrics
+            
+        except Exception as e:
+            self._logger.warning(f"Failed to calculate performance deltas: {e}")
+            return {
+                "read_ops_per_second": 0.0,
+                "write_ops_per_second": 0.0,
+                "read_bandwidth_bytes_per_second": 0.0,
+                "write_bandwidth_bytes_per_second": 0.0,
+                "total_read_ops": 0,
+                "total_write_ops": 0,
+                "total_read_bytes": 0,
+                "total_write_bytes": 0
+            } 

@@ -1,7 +1,8 @@
 import platform
 import logging
 from typing import Dict, Any, Union, List
-from ..zfs_ops import ZFSOperations
+from ..zfs_operations.factories.service_factory import create_default_service_factory
+from ..zfs_operations.services.pool_service import PoolService
 from ..docker_ops import DockerOperations
 from ..security_utils import SecurityUtils
 
@@ -11,9 +12,16 @@ logger = logging.getLogger(__name__)
 class SystemInfoService:
     """Handles system information and capabilities checking"""
     
-    def __init__(self, zfs_ops: ZFSOperations, docker_ops: DockerOperations):
-        self.zfs_ops = zfs_ops
+    def __init__(self, docker_ops: DockerOperations):
         self.docker_ops = docker_ops
+        self._service_factory = create_default_service_factory()
+        self._pool_service = None
+    
+    async def _get_pool_service(self) -> PoolService:
+        """Get the pool service instance"""
+        if self._pool_service is None:
+            self._pool_service = await self._service_factory.create_pool_service()
+        return self._pool_service
     
     async def get_system_info(self) -> Dict[str, Union[str, bool, None]]:
         """Get system information relevant to migrations"""
@@ -33,7 +41,9 @@ class SystemInfoService:
 
         # Check ZFS status safely
         try:
-            zfs_available = await self.zfs_ops.is_zfs_available()
+            pool_service = await self._get_pool_service()
+            pools_result = await pool_service.list_pools()
+            zfs_available = pools_result.is_success
             info["zfs_available"] = zfs_available
             if zfs_available:
                 info["zfs_version"] = await self._get_zfs_version()
@@ -53,7 +63,9 @@ class SystemInfoService:
     async def get_zfs_status(self) -> Dict[str, Any]:
         """Get detailed ZFS status information"""
         try:
-            is_available = await self.zfs_ops.is_zfs_available()
+            pool_service = await self._get_pool_service()
+            pools_result = await pool_service.list_pools()
+            is_available = pools_result.is_success
 
             if not is_available:
                 return {
@@ -66,7 +78,7 @@ class SystemInfoService:
             version = await self._get_zfs_version()
 
             # Get pool list
-            pools = await self._get_zfs_pools()
+            pools = [pool.name for pool in pools_result.value] if pools_result.is_success else []
 
             return {
                 "available": True,
@@ -84,11 +96,13 @@ class SystemInfoService:
     async def _get_zfs_version(self) -> str:
         """Get ZFS version"""
         try:
+            # Use subprocess for version check since new services might not have this method
+            import subprocess
             validated_cmd = SecurityUtils.validate_zfs_command_args("version")
-            returncode, stdout, stderr = await self.zfs_ops.run_command(validated_cmd)
-            if returncode == 0 and stdout:
+            result = subprocess.run(validated_cmd, capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout:
                 # Extract version from first line
-                first_line = stdout.strip().split('\n')[0]
+                first_line = result.stdout.strip().split('\n')[0]
                 if 'zfs-' in first_line:
                     return first_line.split('zfs-')[1].split()[0]
                 return "unknown"
@@ -100,15 +114,10 @@ class SystemInfoService:
     async def _get_zfs_pools(self) -> List[str]:
         """Get list of ZFS pools"""
         try:
-            validated_cmd = SecurityUtils.validate_zfs_command_args(
-                "list", "-H", "-o", "name", "-t", "filesystem")
-            returncode, stdout, stderr = await self.zfs_ops.run_command(validated_cmd)
-            if returncode == 0:
-                pools = []
-                for line in stdout.strip().split('\n'):
-                    if line.strip() and '/' not in line:  # Only root pools
-                        pools.append(line.strip())
-                return pools
+            pool_service = await self._get_pool_service()
+            pools_result = await pool_service.list_pools()
+            if pools_result.is_success:
+                return [pool.name for pool in pools_result.value]
         except Exception:
             pass
         return []

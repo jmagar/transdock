@@ -11,17 +11,11 @@ from pathlib import Path
 # Add the project root to Python path
 sys.path.insert(0, os.path.dirname(__file__))
 
-# Load environment variables from .env file
-try:
-    from dotenv import load_dotenv
-    # Load .env file from project root
-    env_path = Path(__file__).parent / '.env'
-    load_dotenv(env_path)
-    print(f"✅ Environment variables loaded from: {env_path}")
-except ImportError:
-    print("⚠️  python-dotenv not installed. Install with: uv add python-dotenv")
-except Exception as e:
-    print(f"⚠️  Could not load .env file: {e}")
+# Load configuration
+from backend.config import get_config
+
+# Initialize configuration (this will load .env and set up all settings)
+config = get_config()
 
 def main():
     """Main entry point for TransDock API service."""

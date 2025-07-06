@@ -3,7 +3,10 @@ import logging
 from datetime import datetime
 from typing import List, Tuple, Optional
 from ..models import VolumeMount, HostInfo
-from ..zfs_ops import ZFSOperations
+from ..zfs_operations.factories.service_factory import create_default_service_factory
+from ..zfs_operations.services.snapshot_service import SnapshotService as NewSnapshotService
+from ..zfs_operations.core.value_objects.dataset_name import DatasetName
+from ..zfs_operations.infrastructure.command_executor import CommandExecutor
 from ..host_service import HostService
 from ..security_utils import SecurityUtils
 
@@ -11,11 +14,19 @@ logger = logging.getLogger(__name__)
 
 
 class SnapshotService:
-    """Handles ZFS snapshot creation and management operations"""
+    """Handles ZFS snapshot creation and management operations - Legacy wrapper for new service"""
     
-    def __init__(self, zfs_ops: ZFSOperations, host_service: HostService):
-        self.zfs_ops = zfs_ops
+    def __init__(self, host_service: HostService):
         self.host_service = host_service
+        self._service_factory = create_default_service_factory()
+        self._new_snapshot_service = None
+        self._command_executor = CommandExecutor(timeout=30)
+    
+    async def _get_new_service(self) -> NewSnapshotService:
+        """Get the new snapshot service instance"""
+        if self._new_snapshot_service is None:
+            self._new_snapshot_service = await self._service_factory.create_snapshot_service()
+        return self._new_snapshot_service
     
     def generate_timestamp(self) -> str:
         """Generate a timestamp for snapshot naming"""
@@ -29,9 +40,14 @@ class SnapshotService:
                 cmd = "zfs list -H -o name,mountpoint"
                 returncode, stdout, stderr = await self.host_service.run_remote_command(host_info, cmd)
             else:
-                # Local command
+                # Local command - use CommandExecutor for secure execution with timeout
                 validated_cmd = SecurityUtils.validate_zfs_command_args("list", "-H", "-o", "name,mountpoint")
-                returncode, stdout, stderr = await self.zfs_ops.run_command(validated_cmd)
+                # Extract command and arguments: validated_cmd is ["zfs", "list", "-H", "-o", "name,mountpoint"]
+                command = validated_cmd[0]  # "zfs"
+                args = validated_cmd[1:]    # ["list", "-H", "-o", "name,mountpoint"]
+                
+                result = await self._command_executor.execute_system(command, *args)
+                returncode, stdout, stderr = result.returncode, result.stdout, result.stderr
             
             if returncode != 0:
                 logger.warning(f"Failed to list ZFS datasets: {stderr}")
@@ -156,48 +172,54 @@ class SnapshotService:
         """Create a snapshot for a single volume"""
         dataset = volume.source
         try:
-            # create_snapshot returns the snapshot name string, not a boolean
-            snapshot_name = await self.zfs_ops.create_snapshot(dataset)
-            if not snapshot_name:  # Check if empty or None
-                logger.error(f"Failed to create snapshot for {dataset}")
-                return ("", dataset)  # Return empty snapshot name to indicate failure
-            return (snapshot_name, dataset)
+            # Use new snapshot service
+            new_service = await self._get_new_service()
+            dataset_name = DatasetName.from_string(dataset)
+            snapshot_name = f"migration_{timestamp}"
+            
+            result = await new_service.create_snapshot(dataset_name, snapshot_name)
+            if result.is_success:
+                return (result.value.full_name, dataset)
+            
+            logger.error(f"Failed to create snapshot for {dataset}: {result.error}")
+            return ("", dataset)
         except Exception as e:
             logger.error(f"Failed to create snapshot for {dataset}: {e}")
-            return ("", dataset)  # Return empty snapshot name to indicate failure
+            return ("", dataset)
     
     async def cleanup_snapshots(self, snapshot_names: List[str]):
         """Clean up multiple snapshots"""
-        cleanup_tasks = []
+        new_service = await self._get_new_service()
+        
         for snapshot_name in snapshot_names:
-            cleanup_tasks.append(self.zfs_ops.cleanup_snapshot(snapshot_name))
-        
-        results = await asyncio.gather(*cleanup_tasks, return_exceptions=True)
-        
-        # Log any cleanup failures but don't raise
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.warning(f"Failed to cleanup snapshot {snapshot_names[i]}: {result}")
+            try:
+                # Parse snapshot name to get dataset and snapshot parts
+                if '@' in snapshot_name:
+                    dataset_str, snap_name = snapshot_name.split('@', 1)
+                    dataset_name = DatasetName.from_string(dataset_str)
+                    result = await new_service.destroy_snapshot(dataset_name, snap_name, force=True)
+                    if not result.is_success:
+                        logger.warning(f"Failed to cleanup snapshot {snapshot_name}: {result.error}")
+                else:
+                    logger.warning(f"Invalid snapshot name format: {snapshot_name}")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup snapshot {snapshot_name}: {e}")
     
-    async def list_snapshots(self, dataset: str = None) -> List[str]:
+    async def list_snapshots(self, dataset: Optional[str] = None) -> List[str]:
         """List available snapshots"""
         try:
-            if dataset:
-                # List snapshots for specific dataset
-                validated_cmd = SecurityUtils.validate_zfs_command_args(
-                    "list", "-t", "snapshot", "-H", "-o", "name", dataset
-                )
-            else:
-                # List all snapshots
-                validated_cmd = SecurityUtils.validate_zfs_command_args(
-                    "list", "-t", "snapshot", "-H", "-o", "name"
-                )
+            new_service = await self._get_new_service()
             
-            returncode, stdout, stderr = await self.zfs_ops.run_command(validated_cmd)
-            if returncode == 0:
-                return [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+            if dataset:
+                dataset_name = DatasetName.from_string(dataset)
+                result = await new_service.list_snapshots(dataset_name)
             else:
-                logger.error(f"Failed to list snapshots: {stderr}")
+                result = await new_service.list_snapshots(None)
+            
+            if result.is_success:
+                return [snapshot.full_name for snapshot in result.value]
+            else:
+                logger.error(f"Failed to list snapshots: {result.error}")
                 return []
                 
         except Exception as e:
@@ -207,10 +229,14 @@ class SnapshotService:
     async def snapshot_exists(self, snapshot_name: str) -> bool:
         """Check if a snapshot exists"""
         try:
-            validated_cmd = SecurityUtils.validate_zfs_command_args(
-                "list", "-t", "snapshot", "-H", snapshot_name
-            )
-            returncode, stdout, stderr = await self.zfs_ops.run_command(validated_cmd)
-            return returncode == 0
+            if '@' not in snapshot_name:
+                return False
+            
+            dataset_str, snap_name = snapshot_name.split('@', 1)
+            dataset_name = DatasetName.from_string(dataset_str)
+            new_service = await self._get_new_service()
+            
+            result = await new_service.get_snapshot(dataset_name, snap_name)
+            return result.is_success
         except Exception:
             return False

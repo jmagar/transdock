@@ -76,17 +76,23 @@ class HostService:
         )
         
         try:
-            # Check Docker availability
+            # Check Docker availability and version
             returncode, stdout, stderr = await self.run_remote_command(
                 host_info, "docker --version"
             )
             capabilities.docker_available = returncode == 0
+            if capabilities.docker_available and stdout:
+                # Extract version from output like "Docker version 20.10.21, build baeda1f"
+                capabilities.docker_version = stdout.strip()
             
-            # Check ZFS availability
+            # Check ZFS availability and version
             returncode, stdout, stderr = await self.run_remote_command(
                 host_info, "zfs version"
             )
             capabilities.zfs_available = returncode == 0
+            if capabilities.zfs_available and stdout:
+                # Extract version from zfs version output
+                capabilities.zfs_version = stdout.strip().split('\n')[0]  # Take first line
             
             # If ZFS is available, get pools
             if capabilities.zfs_available:
@@ -501,22 +507,17 @@ class HostService:
                 required_bytes=required_bytes,
                 available_bytes=available_bytes,
                 storage_path=safe_path,
-                safety_margin_bytes=safety_margin_bytes
+                safety_margin_bytes=safety_margin_bytes,
+                error_message="" if is_valid else f"Insufficient storage: need {format_bytes(total_required)}, have {format_bytes(available_bytes)}"
             )
             
-            if not is_valid:
-                shortage = total_required - available_bytes
-                result.error_message = f"Insufficient storage space. Need {format_bytes(total_required)} ({format_bytes(required_bytes)} + {format_bytes(safety_margin_bytes)} safety margin), but only {format_bytes(available_bytes)} available. Shortage: {format_bytes(shortage)}"
-            elif available_bytes < required_bytes * 1.5:
-                # Warning if less than 50% extra space
-                result.warning_message = f"Low storage space warning. Only {format_bytes(available_bytes)} available for {format_bytes(required_bytes)} required"
-            
-            logger.info(f"Storage validation for {safe_path}: {'✅ PASS' if is_valid else '❌ FAIL'} - {format_bytes(available_bytes)} available, {format_bytes(total_required)} required")
+            logger.info(f"Storage validation for {safe_path}: {'✓' if is_valid else '✗'} "
+                        f"(need {format_bytes(total_required)}, have {format_bytes(available_bytes)})")
             
             return result
             
         except Exception as e:
-            logger.error(f"Failed to check storage availability: {e}")
+            logger.error(f"Storage validation failed: {e}")
             return StorageValidationResult(
                 is_valid=False,
                 required_bytes=required_bytes,
@@ -636,3 +637,108 @@ class HostService:
                     error_message=f"Storage validation failed: {e}"
                 )
             }
+
+    async def validate_ssh_connection(self, target_host: str, ssh_user: str = "root", ssh_port: int = 22) -> bool:
+        """Validate SSH connection to target host"""
+        try:
+            # Validate inputs
+            SecurityUtils.validate_hostname(target_host)
+            SecurityUtils.validate_username(ssh_user)
+            SecurityUtils.validate_port(ssh_port)
+            
+            # Test SSH connection with a simple command
+            ssh_cmd = SecurityUtils.build_ssh_command(
+                target_host, ssh_user, ssh_port, "echo 'SSH_CONNECTION_TEST'"
+            )
+            
+            # Execute SSH test
+            process = await asyncio.create_subprocess_exec(
+                *ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            success = (
+                process.returncode == 0 and 
+                "SSH_CONNECTION_TEST" in stdout.decode()
+            )
+            
+            if success:
+                logger.info(f"✅ SSH connection validated: {ssh_user}@{target_host}:{ssh_port}")
+            else:
+                logger.error(f"❌ SSH connection failed: {stderr.decode()}")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"SSH connection validation failed: {e}")
+            return False
+
+    async def test_directory_permissions(self, target_host: str, target_path: str, 
+                                         ssh_user: str = "root", ssh_port: int = 22) -> dict:
+        """Test directory permissions on target host"""
+        result = {
+            "writable": False,
+            "readable": False,
+            "exists": False,
+            "can_create": False,
+            "error": None
+        }
+        
+        try:
+            # Validate inputs
+            SecurityUtils.validate_hostname(target_host)
+            SecurityUtils.validate_username(ssh_user)
+            SecurityUtils.validate_port(ssh_port)
+            safe_path = SecurityUtils.sanitize_path(target_path, allow_absolute=True)
+            
+            # Create HostInfo object for existing method
+            host_info = HostInfo(
+                hostname=target_host,
+                ssh_user=ssh_user,
+                ssh_port=ssh_port
+            )
+            
+            # Check if path exists
+            test_exists_cmd = f"test -e {SecurityUtils.escape_shell_argument(safe_path)} && echo 'exists' || echo 'not_exists'"
+            returncode, stdout, stderr = await self.run_remote_command(host_info, test_exists_cmd)
+            
+            if returncode == 0:
+                result["exists"] = "exists" in stdout
+            
+            # Test read permissions
+            if result["exists"]:
+                test_read_cmd = f"test -r {SecurityUtils.escape_shell_argument(safe_path)} && echo 'readable' || echo 'not_readable'"
+                returncode, stdout, stderr = await self.run_remote_command(host_info, test_read_cmd)
+                
+                if returncode == 0:
+                    result["readable"] = "readable" in stdout
+            
+            # Test write permissions by creating a test file
+            test_file = os.path.join(safe_path, ".transdock_write_test")
+            
+            if result["exists"]:
+                # Directory exists, test write in it
+                test_write_cmd = f"touch {SecurityUtils.escape_shell_argument(test_file)} && rm {SecurityUtils.escape_shell_argument(test_file)} && echo 'writable' || echo 'not_writable'"
+                returncode, stdout, stderr = await self.run_remote_command(host_info, test_write_cmd)
+                
+                if returncode == 0:
+                    result["writable"] = "writable" in stdout
+            else:
+                # Directory doesn't exist, test if we can create it
+                test_create_cmd = f"mkdir -p {SecurityUtils.escape_shell_argument(safe_path)} && touch {SecurityUtils.escape_shell_argument(test_file)} && rm {SecurityUtils.escape_shell_argument(test_file)} && echo 'can_create' || echo 'cannot_create'"
+                returncode, stdout, stderr = await self.run_remote_command(host_info, test_create_cmd)
+                
+                if returncode == 0:
+                    result["can_create"] = "can_create" in stdout
+                    result["writable"] = result["can_create"]
+                    result["exists"] = True  # We created it
+            
+            logger.info(f"Permission test for {target_path}: writable={result['writable']}, readable={result['readable']}, exists={result['exists']}")
+            
+        except Exception as e:
+            logger.error(f"Directory permission test failed: {e}")
+            result["error"] = str(e)
+        
+        return result

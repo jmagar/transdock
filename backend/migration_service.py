@@ -7,10 +7,7 @@ backward compatibility with the existing API.
 The monolithic MigrationService has been broken down into:
 - MigrationOrchestrator: Status tracking and workflow coordination  
 - ContainerDiscoveryService: Container discovery and analysis
-- ContainerMigrationService: Container-specific migration operations
-- SnapshotService: ZFS snapshot management
-- SystemInfoService: System information and capabilities
-- ComposeStackService: Legacy compose stack operations
+- New ZFS services: DatasetService, SnapshotService, PoolService
 """
 
 import asyncio
@@ -21,17 +18,16 @@ from .models import (
     ContainerDiscoveryResult, ContainerAnalysis, IdentifierType
 )
 from .docker_ops import DockerOperations
-from .zfs_ops import ZFSOperations
+from .zfs_operations.factories.service_factory import create_default_service_factory
+from .zfs_operations.services.dataset_service import DatasetService
+from .zfs_operations.services.snapshot_service import SnapshotService
+from .zfs_operations.services.pool_service import PoolService
 from .transfer_ops import TransferOperations
 from .host_service import HostService
-from .services import (
-    MigrationOrchestrator,
-    ContainerDiscoveryService,
-    ContainerMigrationService,
-    SnapshotService,
-    SystemInfoService,
-    ComposeStackService
-)
+
+# Import only the services that don't depend on zfs_ops
+from .services.migration_orchestrator import MigrationOrchestrator
+from .services.container_discovery_service import ContainerDiscoveryService
 
 logger = logging.getLogger(__name__)
 
@@ -47,29 +43,29 @@ class MigrationService:
     
     def __init__(self):
         # Initialize core operations
-        self.zfs_ops = ZFSOperations()
+        # Initialize new ZFS services
+        self.zfs_service_factory = create_default_service_factory()
+        self._dataset_service = None
+        self._snapshot_service = None
+        self._pool_service = None
         self.docker_ops = DockerOperations()
-        self.transfer_ops = TransferOperations(zfs_ops=self.zfs_ops)
+        self.transfer_ops = TransferOperations()
         self.host_service = HostService()
         
-        # Initialize specialized services
+        # Initialize specialized services (only those that don't depend on old zfs_ops)
         self.orchestrator = MigrationOrchestrator()
         self.discovery_service = ContainerDiscoveryService(self.docker_ops)
-        self.snapshot_service = SnapshotService(self.zfs_ops, self.host_service)
-        self.system_info_service = SystemInfoService(self.zfs_ops, self.docker_ops)
-        self.compose_stack_service = ComposeStackService(self.docker_ops, self.zfs_ops)
         
-        # Initialize container migration service (needs other services)
-        self.container_migration_service = ContainerMigrationService(
-            self.docker_ops,
-            self.zfs_ops,
-            self.transfer_ops,
-            self.host_service,
-            self.orchestrator,
-            self.discovery_service
-        )
-        
-        logger.info("MigrationService initialized with refactored architecture")
+        logger.info("MigrationService initialized with new ZFS operations architecture")
+    
+    async def get_zfs_services(self):
+        """Get ZFS services - lazy initialization"""
+        if self._dataset_service is None:
+            services = await self.zfs_service_factory.create_all_services()
+            self._dataset_service = services['dataset_service']
+            self._snapshot_service = services['snapshot_service']
+            self._pool_service = services['pool_service']
+        return self._dataset_service, self._snapshot_service, self._pool_service
     
     # === Core Migration Management (delegated to MigrationOrchestrator) ===
     
@@ -107,6 +103,7 @@ class MigrationService:
                                   source_ssh_user: str = "root",
                                   source_ssh_port: int = 22) -> ContainerDiscoveryResult:
         """Discover containers for migration"""
+        # Note: discovery service doesn't use ssh_port, so we ignore it
         return await self.discovery_service.discover_containers(
             container_identifier, identifier_type, label_filters,
             source_host, source_ssh_user
@@ -122,37 +119,53 @@ class MigrationService:
             container_identifier, identifier_type, label_filters, source_host
         )
     
-    # === Container Migration (delegated to ContainerMigrationService) ===
-    
-    async def start_container_migration(self, request: ContainerMigrationRequest) -> str:
-        """Start a container-based migration"""
-        return await self.container_migration_service.start_container_migration(request)
-    
-    # === System Information (delegated to SystemInfoService) ===
-    
-    async def get_system_info(self) -> Dict[str, Any]:
-        """Get system information relevant to migrations"""
-        return await self.system_info_service.get_system_info()
+    # === ZFS Operations using new architecture ===
     
     async def get_zfs_status(self) -> Dict[str, Any]:
         """Get detailed ZFS status information"""
-        return await self.system_info_service.get_zfs_status()
+        try:
+            _, _, pool_service = await self.get_zfs_services()
+            if pool_service is None:
+                raise Exception("Pool service not available")
+            pools_result = await pool_service.list_pools()
+            
+            if pools_result.is_failure:
+                return {
+                    "available": False,
+                    "error": str(pools_result.error),
+                    "pools": []
+                }
+            
+            return {
+                "available": True,
+                "pools": [pool.to_dict() for pool in pools_result.value]
+            }
+        except Exception as e:
+            return {
+                "available": False,
+                "error": str(e),
+                "pools": []
+            }
     
-    async def get_capabilities_summary(self) -> Dict[str, bool]:
-        """Get a summary of system capabilities"""
-        return await self.system_info_service.get_capabilities_summary()
-    
-    # === Legacy Compose Operations (delegated to ComposeStackService) ===
-    
-    async def get_compose_stacks(self) -> List[Dict[str, str]]:
-        """Get list of available Docker Compose stacks (DEPRECATED)"""
-        logger.warning("get_compose_stacks is deprecated. Use container discovery instead.")
-        return await self.compose_stack_service.get_compose_stacks()
-    
-    async def get_stack_info(self, stack_name: str) -> Dict[str, Any]:
-        """Get detailed information about a specific compose stack (DEPRECATED)"""
-        logger.warning("get_stack_info is deprecated. Use container discovery instead.")
-        return await self.compose_stack_service.get_stack_info(stack_name)
+    async def get_system_info(self) -> Dict[str, Any]:
+        """Get system information relevant to migrations"""
+        try:
+            docker_available = self.docker_ops is not None
+            zfs_status = await self.get_zfs_status()
+            
+            return {
+                "docker": {"available": docker_available},
+                "zfs": zfs_status,
+                "migration_service": "active",
+                "architecture": "new_zfs_operations"
+            }
+        except Exception as e:
+            logger.error(f"Failed to get system info: {e}")
+            return {
+                "docker": {"available": False, "error": str(e)},
+                "zfs": {"available": False, "error": str(e)},
+                "migration_service": "error"
+            }
     
     # === Legacy Migration Support ===
     
@@ -181,7 +194,8 @@ class MigrationService:
                 force_rsync=request.force_rsync or False
             )
             
-            return await self.start_container_migration(container_request)
+            # TODO: Implement container migration using new service layer
+            raise NotImplementedError("Container migration not yet implemented with new service layer")
             
         except Exception as e:
             logger.error(f"Failed to convert legacy migration to container migration: {e}")
@@ -199,17 +213,17 @@ class MigrationService:
         
         # Check Docker operations
         try:
-            docker_status = await self.system_info_service.check_docker_status()
+            docker_available = self.docker_ops is not None
             health["services"]["docker"] = {
-                "status": "healthy" if docker_status["available"] else "unhealthy",
-                "details": docker_status
+                "status": "healthy" if docker_available else "unhealthy",
+                "details": {"available": docker_available}
             }
         except Exception as e:
             health["services"]["docker"] = {"status": "error", "error": str(e)}
         
-        # Check ZFS operations
+        # Check ZFS operations using new service layer
         try:
-            zfs_status = await self.system_info_service.get_zfs_status()
+            zfs_status = await self.get_zfs_status()
             health["services"]["zfs"] = {
                 "status": "healthy" if zfs_status["available"] else "unavailable",
                 "details": zfs_status
@@ -264,3 +278,46 @@ class MigrationService:
             "migration_status": "complete",
             "backward_compatibility": "maintained"
         }
+
+    # === Compose Stack Operations (Legacy Support) ===
+    
+    async def get_compose_stacks(self) -> List[Dict[str, str]]:
+        """Get list of available Docker Compose stacks (legacy support)"""
+        try:
+            from .services.compose_stack_service import ComposeStackService
+            compose_service = ComposeStackService(self.docker_ops)
+            return await compose_service.get_compose_stacks()
+        except Exception as e:
+            logger.error(f"Failed to get compose stacks: {e}")
+            return []
+    
+    async def get_stack_info(self, stack_name: str) -> Dict[str, Any]:
+        """Get detailed information about a specific compose stack (legacy support)"""
+        try:
+            from .services.compose_stack_service import ComposeStackService
+            compose_service = ComposeStackService(self.docker_ops)
+            return await compose_service.get_stack_info(stack_name)
+        except Exception as e:
+            logger.error(f"Failed to get stack info for {stack_name}: {e}")
+            raise
+    
+    # === Container Migration Operations ===
+    
+    async def start_container_migration(self, request: ContainerMigrationRequest) -> str:
+        """Start a container-based migration"""
+        try:
+            from .services.container_migration_service import ContainerMigrationService
+            
+            # Create container migration service with updated dependencies
+            container_migration_service = ContainerMigrationService(
+                docker_ops=self.docker_ops,
+                transfer_ops=self.transfer_ops,
+                host_service=self.host_service,
+                orchestrator=self.orchestrator,
+                discovery_service=self.discovery_service
+            )
+            
+            return await container_migration_service.start_container_migration(request)
+        except Exception as e:
+            logger.error(f"Failed to start container migration: {e}")
+            raise

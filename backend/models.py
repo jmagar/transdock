@@ -108,6 +108,22 @@ class HostCapabilities(BaseModel):
     zfs_pools: List[str] = []
     storage_info: List[StorageInfo] = []
     error: Optional[str] = None
+    
+    # Additional attributes expected by the routers
+    is_accessible: bool = True
+    has_docker: bool = False
+    has_zfs: bool = False
+    docker_version: Optional[str] = None
+    zfs_version: Optional[str] = None
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        # Set computed fields based on existing attributes
+        self.has_docker = self.docker_available
+        self.has_zfs = self.zfs_available
+        # Set is_accessible to True by default if not provided and no error exists
+        if 'is_accessible' not in data:
+            self.is_accessible = self.error is None
 
 
 class RemoteStack(BaseModel):

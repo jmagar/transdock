@@ -6,7 +6,10 @@ from ..models import (
     TransferMethod, HostInfo, IdentifierType
 )
 from ..docker_ops import DockerOperations, ContainerInfo, NetworkInfo
-from ..zfs_ops import ZFSOperations
+from ..zfs_operations.factories.service_factory import create_default_service_factory
+from ..zfs_operations.services.dataset_service import DatasetService
+from ..zfs_operations.services.snapshot_service import SnapshotService as NewSnapshotService
+
 from ..transfer_ops import TransferOperations
 from ..host_service import HostService
 from .migration_orchestrator import MigrationOrchestrator
@@ -20,28 +23,68 @@ class ContainerMigrationService:
     
     def __init__(self, 
                  docker_ops: DockerOperations,
-                 zfs_ops: ZFSOperations,
                  transfer_ops: TransferOperations,
                  host_service: HostService,
                  orchestrator: MigrationOrchestrator,
                  discovery_service: ContainerDiscoveryService):
         self.docker_ops = docker_ops
-        self.zfs_ops = zfs_ops
         self.transfer_ops = transfer_ops
         self.host_service = host_service
         self.orchestrator = orchestrator
         self.discovery_service = discovery_service
+        self._service_factory = create_default_service_factory()
+        self._dataset_service = None
+        self._snapshot_service = None
+    
+    async def _get_dataset_service(self) -> DatasetService:
+        """Get the dataset service instance"""
+        if self._dataset_service is None:
+            self._dataset_service = await self._service_factory.create_dataset_service()
+        return self._dataset_service
+    
+    async def _get_snapshot_service(self) -> NewSnapshotService:
+        """Get the snapshot service instance"""
+        if self._snapshot_service is None:
+            self._snapshot_service = await self._service_factory.create_snapshot_service()
+        return self._snapshot_service
+    
+    def _handle_migration_completion(self, migration_id: str, task: asyncio.Task) -> None:
+        """Handle completion of background migration task and log any exceptions"""
+        try:
+            if task.done() and task.exception():
+                exception = task.exception()
+                error_msg = f"Background migration task for {migration_id} failed: {exception}"
+                logger.error(error_msg)
+                logger.exception("Full traceback for migration task failure", exc_info=exception)
+                
+                # Update orchestrator with error status
+                loop = asyncio.get_running_loop()
+                asyncio.run_coroutine_threadsafe(
+                    self.orchestrator.update_error(migration_id, error_msg),
+                    loop
+                )
+
+        except Exception as e:
+            # This shouldn't happen, but just in case there's an issue with the callback itself
+            logger.error(f"Error in migration completion handler for {migration_id}: {e}")
     
     async def start_container_migration(self, request: ContainerMigrationRequest) -> str:
         """Start a container-based migration"""
         migration_id = self.orchestrator.create_migration_id()
         
         try:
-            # Discover containers using unified Docker API
+            containers = []
+            all_volumes = []
+            networks = []
+
             if request.identifier_type == IdentifierType.PROJECT:
-                containers = await self.docker_ops.discover_containers_by_project(
-                    request.container_identifier, request.source_host, request.source_ssh_user
+                compose_info = await self.docker_ops.discover_services_from_compose_file(
+                    request.container_identifier
                 )
+                containers = compose_info.get("containers", [])
+                all_volumes = compose_info.get("volumes", [])
+                networks = [net.__dict__ for net in compose_info.get("networks", [])]
+
             elif request.identifier_type == IdentifierType.NAME:
                 containers = await self.docker_ops.discover_containers_by_name(
                     request.container_identifier, request.source_host, request.source_ssh_user
@@ -52,20 +95,19 @@ class ContainerMigrationService:
                 )
 
             if not containers:
-                raise ValueError(f"No containers found matching criteria")
+                raise ValueError("No containers or services found matching criteria")
 
-            # Extract volumes from all containers
-            all_volumes = []
-            for container in containers:
-                volumes = await self.docker_ops.get_container_volumes(container, request.source_host, request.source_ssh_user)
-                all_volumes.extend(volumes)
+            # Extract volumes from running containers if not a project-based discovery
+            if request.identifier_type != IdentifierType.PROJECT:
+                for container in containers:
+                    volumes = await self.docker_ops.get_container_volumes(container, request.source_host, request.source_ssh_user)
+                    all_volumes.extend(volumes)
 
             # Remove duplicates
             unique_volumes = self.discovery_service._deduplicate_volumes(all_volumes)
 
-            # Get networks for project-based migrations
-            networks = []
-            if request.identifier_type == IdentifierType.PROJECT:
+            # Get networks for project-based migrations if not already discovered
+            if request.identifier_type == IdentifierType.PROJECT and not networks:
                 project_networks = await self.docker_ops.get_project_networks(
                     request.container_identifier, request.source_host, request.source_ssh_user
                 )
@@ -82,24 +124,28 @@ class ContainerMigrationService:
                 target_host=request.target_host,
                 target_base_path=request.target_base_path,
                 volumes=unique_volumes,
-                containers=[container.__dict__ for container in containers],
+                containers=[c.__dict__ for c in containers],
                 networks=networks
             )
             
-            self.orchestrator.register_migration(migration_id, status)
+            await self.orchestrator.register_migration(migration_id, status)
 
-            # Start migration process
-            asyncio.create_task(self._execute_container_migration(migration_id, request, containers, unique_volumes, networks))
+            # Start migration process in background (task runs independently)
+            migration_task = asyncio.create_task(self._execute_container_migration(migration_id, request, containers, unique_volumes, networks))
+            # Note: We don't await this task as it should run in the background
+            migration_task.add_done_callback(
+                lambda t: self._handle_migration_completion(migration_id, t)
+            )
 
             logger.info(f"Started container migration {migration_id} for {request.container_identifier}")
             return migration_id
 
         except Exception as e:
-            error_msg = f"Failed to start container migration: {e}"
+            error_msg = f"Failed to start container migration for {migration_id}: {e}"
             logger.error(error_msg)
             
-            if migration_id:
-                await self.orchestrator.update_error(migration_id, error_msg)
+            # Ensure orchestrator is updated with the error
+            await self.orchestrator.update_error(migration_id, error_msg)
             
             raise
     
@@ -141,29 +187,25 @@ class ContainerMigrationService:
                 error_messages = [f"{location}: {result.error_message}" for location, result in failed_validations.items()]
                 raise Exception(f"Storage validation failed: {'; '.join(error_messages)}")
 
-            # Step 2: Stop containers
-            await self.orchestrator.update_status(migration_id, "stopping", 20, "Stopping containers")
-            
-            # Stop containers using unified Docker API
-            success = await self.docker_ops.stop_containers(
-                containers, 10, request.source_host, request.source_ssh_user
-            )
-            
-            if not success:
-                raise Exception("Failed to stop containers")
+            # Step 2: Stop containers - only if not a file-based discovery
+            if request.identifier_type != IdentifierType.PROJECT:
+                await self.orchestrator.update_status(migration_id, "stopping", 20, "Stopping containers")
+                
+                # Stop containers using unified Docker API
+                success = await self.docker_ops.stop_containers(
+                    containers, 10, request.source_host, request.source_ssh_user
+                )
+                
+                if not success:
+                    raise Exception("Failed to stop containers")
 
             # Step 3: Create snapshots and migrate data
             await self.orchestrator.update_status(migration_id, "migrating", 30, "Migrating container data")
             
-            # Determine transfer method
-            target_has_zfs = await self.zfs_ops.check_remote_zfs(
-                request.target_host, request.ssh_user, request.ssh_port
-            )
-            source_has_zfs = request.source_host is None or await self.zfs_ops.check_remote_zfs(
-                request.source_host or "localhost",
-                request.source_ssh_user,
-                request.source_ssh_port
-            )
+            # Determine transfer method - simplified for now
+            # TODO: Implement proper ZFS checking with new service layer
+            target_has_zfs = False  # Disable ZFS for now until proper implementation
+            source_has_zfs = False
 
             use_zfs = target_has_zfs and source_has_zfs and not request.force_rsync
             transfer_method = TransferMethod.ZFS_SEND if use_zfs else TransferMethod.RSYNC
@@ -177,18 +219,8 @@ class ContainerMigrationService:
                 volume_mapping[volume.source] = target_path
 
                 if use_zfs:
-                    # ZFS migration
-                    dataset_name = await self.zfs_ops.get_dataset_name(volume.source)
-                    snapshot_name = await self.zfs_ops.create_snapshot(volume.source)
-                    snapshots.append(snapshot_name)
-                    
-                    # Send snapshot to target
-                    success = await self.zfs_ops.send_snapshot(
-                        snapshot_name, request.target_host, target_path,
-                        request.ssh_user, request.ssh_port
-                    )
-                    if not success:
-                        raise Exception(f"Failed to send ZFS snapshot for {volume.source}")
+                    # ZFS migration - TODO: Implement with new service layer
+                    raise Exception("ZFS migration not yet implemented with new service layer")
                 else:
                     # Rsync migration
                     success = await self.transfer_ops.transfer_via_rsync(

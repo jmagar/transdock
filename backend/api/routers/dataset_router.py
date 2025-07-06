@@ -1,7 +1,7 @@
 """
 Dataset API router using the new service layer.
 """
-from typing import Optional
+from typing import Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import JSONResponse
 
@@ -15,9 +15,13 @@ from ...zfs_operations.services.dataset_service import DatasetService
 from ...zfs_operations.core.value_objects.dataset_name import DatasetName
 from ...zfs_operations.core.exceptions.zfs_exceptions import ZFSException
 from ...zfs_operations.core.exceptions.validation_exceptions import ValidationException
+from ...security_utils import SecurityValidationError
+import logging
 
 
 router = APIRouter(prefix="/api/v1/datasets", tags=["datasets"])
+
+logger = logging.getLogger(__name__)
 
 
 @router.post("/", response_model=DatasetResponse, status_code=201)
@@ -241,4 +245,59 @@ async def unmount_dataset(
     except ZFSException as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e 
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
+
+
+@router.post("/{dataset_name}/performance/monitor", response_model=APIResponse)
+async def monitor_dataset_performance(
+    dataset_name: str,
+    duration_seconds: int = Query(30, description="Duration to monitor in seconds"),
+    dataset_service: DatasetService = Depends(get_dataset_service)
+):
+    """Monitor performance metrics for a specific ZFS dataset"""
+    try:
+        name = DatasetName.from_string(dataset_name)
+        result = await dataset_service.monitor_dataset_performance(name, duration_seconds)
+        
+        if result.is_success:
+            return APIResponse(
+                success=True,
+                data={"dataset": dataset_name, "performance": result.value}
+            )
+        
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to monitor dataset performance: {result.error}"
+        )
+    except ValidationException as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except ZFSException as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
+
+
+@router.get("/legacy", response_model=Dict[str, Any])
+async def list_datasets_legacy(
+    dataset_service: DatasetService = Depends(get_dataset_service)
+):
+    """List available ZFS datasets with security validation (legacy endpoint)"""
+    try:
+        # Use the new service layer's list_datasets method
+        result = await dataset_service.list_datasets()
+        
+        if result.is_success:
+            datasets = []
+            for dataset in result.value:
+                datasets.append({
+                    "name": str(dataset.name),
+                    "mountpoint": dataset.properties.get("mountpoint", "")
+                })
+            return {"datasets": datasets}
+        
+        raise HTTPException(status_code=500, detail=f"Failed to list datasets: {result.error}")
+    except SecurityValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error listing datasets: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) 
