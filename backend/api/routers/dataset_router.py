@@ -248,7 +248,7 @@ async def unmount_dataset(
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
 
 
-@router.post("/{dataset_name}/performance/monitor", response_model=Dict[str, Any])
+@router.post("/{dataset_name}/performance/monitor", response_model=APIResponse)
 async def monitor_dataset_performance(
     dataset_name: str,
     duration_seconds: int = Query(30, description="Duration to monitor in seconds"),
@@ -256,17 +256,25 @@ async def monitor_dataset_performance(
 ):
     """Monitor performance metrics for a specific ZFS dataset"""
     try:
-        performance_data = await dataset_service.monitor_dataset_performance(dataset_name, duration_seconds)
+        name = DatasetName.from_string(dataset_name)
+        result = await dataset_service.monitor_dataset_performance(name, duration_seconds)
         
-        if not performance_data:
-            raise HTTPException(status_code=404, detail="Failed to monitor dataset performance")
+        if result.is_success:
+            return APIResponse(
+                success=True,
+                data={"dataset": dataset_name, "performance": result.value}
+            )
         
-        return {"dataset": dataset_name, "performance": performance_data}
-    except SecurityValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to monitor dataset performance: {result.error}"
+        )
+    except ValidationException as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except ZFSException as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
-        logger.error(f"Error monitoring dataset performance: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
 
 
 @router.get("/legacy", response_model=Dict[str, Any])
@@ -286,8 +294,8 @@ async def list_datasets_legacy(
                     "mountpoint": dataset.properties.get("mountpoint", "")
                 })
             return {"datasets": datasets}
-        else:
-            raise HTTPException(status_code=500, detail=f"Failed to list datasets: {result.error}")
+        
+        raise HTTPException(status_code=500, detail=f"Failed to list datasets: {result.error}")
     except SecurityValidationError as e:
         raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
     except Exception as e:

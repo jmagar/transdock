@@ -1,6 +1,5 @@
 from fastapi import APIRouter, HTTPException
 from datetime import datetime, timezone
-from typing import Optional
 
 from ...config import get_config
 from ...migration_service import MigrationService

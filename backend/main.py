@@ -7,12 +7,9 @@ and services for the TransDock container migration platform.
 """
 
 import logging
-import asyncio
-from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -22,7 +19,7 @@ from .config import get_config
 # Import services
 from .migration_service import MigrationService
 from .host_service import HostService
-from .security_utils import SecurityUtils, SecurityValidationError
+from .security_utils import SecurityValidationError
 
 # Import routers
 from .api.routers import (
@@ -75,9 +72,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=config.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
+
 
 # Custom exception handler for security validation errors
 @app.exception_handler(SecurityValidationError)
@@ -101,6 +99,7 @@ app.include_router(system_router.router)
 app.include_router(compose_router.router)
 app.include_router(host_router.router)
 
+
 # Root endpoint
 @app.get("/")
 async def root():
@@ -112,6 +111,7 @@ async def root():
         "docs": "/docs",
         "health": "/api/system/health"
     }
+
 
 # Legacy datasets endpoint - redirect to new API
 @app.get("/datasets")

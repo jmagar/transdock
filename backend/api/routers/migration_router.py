@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException
 from typing import Optional
 import os
 import asyncio
@@ -158,6 +158,190 @@ async def cleanup_migration(migration_id: str):
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+# Helper functions for SSH security and smart migration
+
+async def add_ssh_host_key(target_host: str, ssh_port: int = 22) -> dict:
+    """
+    Add SSH host key to known_hosts file for secure connections.
+    
+    This function helps users properly set up host key verification
+    by automatically fetching and adding the target host's key.
+    
+    Returns:
+        dict: Result with success status and any error messages
+    """
+    result = {
+        "success": False,
+        "message": "",
+        "host_key_added": False
+    }
+    
+    try:
+        import os
+        from pathlib import Path
+        
+        # Ensure .ssh directory exists
+        ssh_dir = Path.home() / ".ssh"
+        ssh_dir.mkdir(mode=0o700, exist_ok=True)
+        
+        known_hosts_file = ssh_dir / "known_hosts"
+        
+        # Use ssh-keyscan to get host key
+        process = await asyncio.create_subprocess_exec(
+            "ssh-keyscan", "-p", str(ssh_port), target_host,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode == 0 and stdout:
+            host_key = stdout.decode().strip()
+            
+            # Check if host key already exists
+            if known_hosts_file.exists():
+                with open(known_hosts_file, 'r') as f:
+                    existing_keys = f.read()
+                    if target_host in existing_keys:
+                        result["message"] = f"Host key for {target_host} already exists in known_hosts"
+                        result["success"] = True
+                        return result
+            
+            # Append new host key
+            with open(known_hosts_file, 'a') as f:
+                f.write(f"{host_key}\n")
+            
+            # Set proper permissions
+            known_hosts_file.chmod(0o600)
+            
+            result["success"] = True
+            result["host_key_added"] = True
+            result["message"] = f"Successfully added host key for {target_host}:{ssh_port}"
+            logger.info(f"✅ Added SSH host key for {target_host}:{ssh_port}")
+            
+        else:
+            error_msg = stderr.decode() if stderr else "Unknown error"
+            result["message"] = f"Failed to retrieve host key: {error_msg}"
+            logger.error(f"Failed to get host key for {target_host}: {error_msg}")
+            
+    except Exception as e:
+        result["message"] = f"Error adding host key: {e}"
+        logger.error(f"Error adding host key for {target_host}: {e}")
+    
+    return result
+
+
+# Helper functions for smart migration
+
+async def _discover_compose_project(identifier: str, compose_base_path: str) -> Optional[str]:
+    """
+    Discover compose project path from identifier and compose base path.
+    
+    Returns:
+        str: Path to compose project if found, None otherwise
+    """
+    compose_project_path = None
+    compose_files = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']
+    
+    # Check if identifier is already a full path
+    if os.path.isabs(identifier) and os.path.exists(identifier):
+        # Check if it's a directory with compose file
+        if os.path.isdir(identifier):
+            for compose_file in compose_files:
+                if os.path.exists(os.path.join(identifier, compose_file)):
+                    compose_project_path = identifier
+                    break
+    else:
+        # Look for project by name in compose base path
+        potential_path = os.path.join(compose_base_path, identifier)
+        if os.path.exists(potential_path) and os.path.isdir(potential_path):
+            for compose_file in compose_files:
+                if os.path.exists(os.path.join(potential_path, compose_file)):
+                    compose_project_path = potential_path
+                    break
+    
+    return compose_project_path
+
+
+async def _handle_container_fallback(
+    identifier: str, 
+    ssh_user: str, 
+    ssh_port: int, 
+    compose_base_path: str
+) -> Optional[dict]:
+    """
+    Handle container discovery as fallback when no compose project is found.
+    
+    Returns:
+        dict: Container fallback response if containers found, None otherwise
+    """
+    logger.info(f"❌ No compose project found for '{identifier}', searching containers...")
+    
+    try:
+        from ...models import IdentifierType
+        containers = await migration_service.discover_containers(
+            container_identifier=identifier,
+            identifier_type=IdentifierType.NAME,
+            source_host=None,
+            source_ssh_user=ssh_user,
+            source_ssh_port=ssh_port
+        )
+        
+        if containers and hasattr(containers, 'containers') and containers.containers:
+            container_count = len(containers.containers)
+            
+            # Suggest compose migration instead
+            return {
+                "status": "suggestion",
+                "migration_type": "container_fallback", 
+                "message": f"⚠️  Found {container_count} running container(s) with '{identifier}', but no compose project",
+                "suggestion": f"Consider using container migration endpoint instead, or check if '{identifier}' is a compose project",
+                "containers_found": [{"name": c["name"], "id": c["id"]} for c in containers.containers],
+                "recommendations": [
+                    f"For complete stack migration, look for compose project in {compose_base_path}",
+                    "For individual containers, use /migrations/containers endpoint",
+                    f"To create compose project, run: cd {compose_base_path} && mkdir {identifier}"
+                ],
+                "next_steps": {
+                    "container_migration": "/migrations/containers with identifier_type=name",
+                    "create_compose": f"mkdir -p {compose_base_path}/{identifier} && cd {compose_base_path}/{identifier}"
+                }
+            }
+        
+    except Exception as e:
+        logger.warning(f"Container search failed: {e}")
+    
+    return None
+
+
+def _create_not_found_response(identifier: str, compose_base_path: str) -> dict:
+    """
+    Create a "not found" response with helpful suggestions.
+    
+    Returns:
+        dict: Not found response with suggestions and available projects
+    """
+    return {
+        "status": "not_found",
+        "migration_type": "none",
+        "message": f"❌ No compose project or containers found for '{identifier}'",
+        "searched_locations": [
+            f"{compose_base_path}/{identifier}",
+            f"Running containers matching '{identifier}'"
+        ],
+        "suggestions": [
+            f"✅ Create compose project: mkdir -p {compose_base_path}/{identifier}",
+            f"✅ Check spelling: ls {compose_base_path}/",
+            "✅ Use full path: /path/to/your/project",
+            "✅ Start containers first if migrating running services"
+        ],
+        "available_projects": [
+            item for item in os.listdir(compose_base_path) 
+            if os.path.isdir(os.path.join(compose_base_path, item))
+        ] if os.path.exists(compose_base_path) else []
+    }
+
+
 # Container Discovery and Analysis Endpoints
 
 @router.post("/smart")
@@ -189,26 +373,7 @@ async def smart_migration(
         logger.info(f"🎯 Smart migration requested for: '{identifier}'")
         
         # STEP 1: 🥇 CHECK FOR COMPOSE PROJECT FIRST
-        compose_project_path = None
-        
-        # Check if identifier is already a full path
-        if os.path.isabs(identifier) and os.path.exists(identifier):
-            # Check if it's a directory with compose file
-            if os.path.isdir(identifier):
-                compose_files = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']
-                for compose_file in compose_files:
-                    if os.path.exists(os.path.join(identifier, compose_file)):
-                        compose_project_path = identifier
-                        break
-        else:
-            # Look for project by name in compose base path
-            potential_path = os.path.join(compose_base_path, identifier)
-            if os.path.exists(potential_path) and os.path.isdir(potential_path):
-                compose_files = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'] 
-                for compose_file in compose_files:
-                    if os.path.exists(os.path.join(potential_path, compose_file)):
-                        compose_project_path = potential_path
-                        break
+        compose_project_path = await _discover_compose_project(identifier, compose_base_path)
         
         # FOUND COMPOSE PROJECT! 🎉
         if compose_project_path:
@@ -240,63 +405,14 @@ async def smart_migration(
             }
         
         # STEP 2: 🥈 FALLBACK TO CONTAINER SEARCH
-        logger.info(f"❌ No compose project found for '{identifier}', searching containers...")
-        
-        # Try to find running containers with the identifier
-        try:
-            from ...models import IdentifierType
-            containers = await migration_service.discover_containers(
-                container_identifier=identifier,
-                identifier_type=IdentifierType.NAME,
-                source_host=None,
-                source_ssh_user=ssh_user,
-                source_ssh_port=ssh_port
-            )
-            
-            if containers and hasattr(containers, 'containers') and containers.containers:
-                container_count = len(containers.containers)
-                
-                # Suggest compose migration instead
-                return {
-                    "status": "suggestion",
-                    "migration_type": "container_fallback", 
-                    "message": f"⚠️  Found {container_count} running container(s) with '{identifier}', but no compose project",
-                    "suggestion": f"Consider using container migration endpoint instead, or check if '{identifier}' is a compose project",
-                    "containers_found": [{"name": c["name"], "id": c["id"]} for c in containers.containers],
-                    "recommendations": [
-                        f"For complete stack migration, look for compose project in {compose_base_path}",
-                        "For individual containers, use /migrations/containers endpoint",
-                        f"To create compose project, run: cd {compose_base_path} && mkdir {identifier}"
-                    ],
-                    "next_steps": {
-                        "container_migration": "/migrations/containers with identifier_type=name",
-                        "create_compose": f"mkdir -p {compose_base_path}/{identifier} && cd {compose_base_path}/{identifier}"
-                    }
-                }
-            
-        except Exception as e:
-            logger.warning(f"Container search failed: {e}")
+        container_fallback_result = await _handle_container_fallback(
+            identifier, ssh_user, ssh_port, compose_base_path
+        )
+        if container_fallback_result:
+            return container_fallback_result
         
         # STEP 3: 😞 NOTHING FOUND - HELPFUL ERROR
-        return {
-            "status": "not_found",
-            "migration_type": "none",
-            "message": f"❌ No compose project or containers found for '{identifier}'",
-            "searched_locations": [
-                f"{compose_base_path}/{identifier}",
-                f"Running containers matching '{identifier}'"
-            ],
-            "suggestions": [
-                f"✅ Create compose project: mkdir -p {compose_base_path}/{identifier}",
-                f"✅ Check spelling: ls {compose_base_path}/",
-                "✅ Use full path: /path/to/your/project",
-                "✅ Start containers first if migrating running services"
-            ],
-            "available_projects": [
-                item for item in os.listdir(compose_base_path) 
-                if os.path.isdir(os.path.join(compose_base_path, item))
-            ] if os.path.exists(compose_base_path) else []
-        }
+        return _create_not_found_response(identifier, compose_base_path)
             
     except SecurityValidationError as e:
         raise HTTPException(status_code=422, detail=f"Security validation failed: {e}") from e
@@ -387,6 +503,46 @@ async def start_compose_migration(
     except Exception as e:
         logger.error(f"Compose migration failed to start: {e}")
         raise HTTPException(status_code=500, detail=f"Compose migration failed to start: {e}") from e
+
+
+@router.post("/add-host-key")
+async def add_host_key_endpoint(
+    target_host: str,
+    ssh_port: int = 22
+):
+    """
+    🔐 ADD SSH HOST KEY FOR SECURE CONNECTIONS
+    
+    Adds the target host's SSH key to the known_hosts file to enable
+    secure host verification for migrations. This must be done before
+    attempting migrations to hosts not already in known_hosts.
+    
+    - **target_host**: The hostname or IP address to add
+    - **ssh_port**: SSH port (default: 22)
+    """
+    try:
+        result = await add_ssh_host_key(target_host, ssh_port)
+        
+        if result["success"]:
+            return {
+                "success": True,
+                "message": result["message"],
+                "host_key_added": result.get("host_key_added", False),
+                "next_steps": [
+                    "Host key has been added to ~/.ssh/known_hosts",
+                    "You can now safely migrate to this host",
+                    "Use /migrations/validate to verify connectivity"
+                ]
+            }
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to add host key: {result['message']}"
+            )
+            
+    except Exception as e:
+        logger.error(f"Host key addition failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Host key addition failed: {e}") from e
 
 
 @router.post("/validate")
@@ -584,6 +740,203 @@ async def verify_migration_integrity(
 
 # Helper functions for migration operations
 
+class ValidationResult:
+    """Standard validation result structure"""
+    def __init__(self, passed: bool = False, errors: Optional[list] = None, warnings: Optional[list] = None, data: Optional[dict] = None):
+        self.passed = passed
+        self.errors = errors or []
+        self.warnings = warnings or []
+        self.data = data or {}
+
+
+async def validate_explicit_target(target_path: str) -> ValidationResult:
+    """
+    Validate that target path is explicitly provided (no defaults).
+    
+    Returns:
+        ValidationResult: Result of explicit target validation
+    """
+    result = ValidationResult()
+    
+    try:
+        if config.require_explicit_target:
+            if not target_path or target_path.strip() == "":
+                result.errors.append("❌ Target path must be explicitly provided")
+                result.passed = False
+            elif target_path in [config.default_target_compose_path, config.default_target_appdata_path]:
+                result.warnings.append(f"⚠️ Using default target path: {target_path}")
+                result.passed = True
+            else:
+                result.passed = True
+        else:
+            result.passed = True
+            
+    except Exception as e:
+        result.errors.append(f"❌ Explicit target validation error: {e}")
+        result.passed = False
+    
+    return result
+
+
+async def validate_ssh_connectivity(target_host: str, ssh_user: str, ssh_port: int) -> ValidationResult:
+    """
+    Validate SSH connectivity to target host.
+    
+    Returns:
+        ValidationResult: Result of SSH connectivity validation
+    """
+    from ...host_service import HostService
+    
+    result = ValidationResult()
+    host_service = HostService()
+    
+    try:
+        ssh_test = await host_service.validate_ssh_connection(target_host, ssh_user, ssh_port)
+        if ssh_test:
+            result.passed = True
+        else:
+            result.errors.append(f"❌ Cannot establish SSH connection to {target_host}")
+            result.passed = False
+            
+    except Exception as e:
+        result.errors.append(f"❌ SSH connection failed: {e}")
+        result.passed = False
+    
+    return result
+
+
+async def validate_directory_permissions(
+    target_host: str, 
+    target_path: str, 
+    ssh_user: str, 
+    ssh_port: int
+) -> ValidationResult:
+    """
+    Validate directory permissions and writability.
+    
+    Returns:
+        ValidationResult: Result of directory permissions validation
+    """
+    from ...host_service import HostService
+    
+    result = ValidationResult()
+    host_service = HostService()
+    
+    try:
+        # Test if we can create/write to target directory
+        permission_test = await host_service.test_directory_permissions(
+            target_host, target_path, ssh_user, ssh_port
+        )
+        
+        if permission_test.get("writable", False):
+            result.passed = True
+            result.data = permission_test
+        else:
+            result.errors.append(
+                f"❌ No write permissions to {target_path} on {target_host}"
+            )
+            result.passed = False
+            
+    except Exception as e:
+        result.errors.append(f"❌ Permission check failed: {e}")
+        result.passed = False
+    
+    return result
+
+
+async def validate_storage_space(
+    target_host: str,
+    target_path: str, 
+    required_space_bytes: int,
+    ssh_user: str,
+    ssh_port: int
+) -> ValidationResult:
+    """
+    Validate sufficient storage space on target.
+    
+    Returns:
+        ValidationResult: Result of storage space validation
+    """
+    from ...host_service import HostService
+    from ...models import HostInfo
+    
+    result = ValidationResult()
+    host_service = HostService()
+    
+    try:
+        # Create HostInfo object for the call
+        target_host_info = HostInfo(hostname=target_host, ssh_user=ssh_user, ssh_port=ssh_port)
+        storage_results = await host_service.get_storage_info(target_host_info, [target_path])
+        storage_info = storage_results[0] if storage_results else None
+        available_bytes = storage_info.available_bytes if storage_info else 0
+        available_gb = round(available_bytes / (1024**3), 2)
+        
+        result.data = {
+            "available_bytes": available_bytes,
+            "available_gb": available_gb,
+            "required_bytes": required_space_bytes,
+            "required_gb": round(required_space_bytes / (1024**3), 2)
+        }
+        
+        if available_bytes >= required_space_bytes:
+            result.passed = True
+        else:
+            required_gb = round(required_space_bytes / (1024**3), 2)
+            result.errors.append(
+                f"❌ Insufficient storage: need {required_gb}GB, have {available_gb}GB"
+            )
+            result.passed = False
+            
+    except Exception as e:
+        result.errors.append(f"❌ Storage check failed: {e}")
+        result.passed = False
+    
+    return result
+
+
+async def validate_host_accessibility(
+    target_host: str,
+    ssh_user: str,
+    ssh_port: int
+) -> ValidationResult:
+    """
+    Validate target host accessibility and capabilities.
+    
+    Returns:
+        ValidationResult: Result of host accessibility validation
+    """
+    from ...host_service import HostService
+    from ...models import HostInfo
+    
+    result = ValidationResult()
+    host_service = HostService()
+    
+    try:
+        # Basic connectivity test
+        host_capabilities = await host_service.check_host_capabilities(
+            HostInfo(hostname=target_host, ssh_user=ssh_user, ssh_port=ssh_port)
+        )
+        
+        result.passed = host_capabilities.is_accessible
+        if not host_capabilities.is_accessible:
+            result.errors.append(f"❌ Target host {target_host} is not accessible")
+        
+        # Store host capabilities for reference
+        result.data = {
+            "has_docker": host_capabilities.has_docker,
+            "has_zfs": host_capabilities.has_zfs,
+            "docker_version": host_capabilities.docker_version,
+            "zfs_version": host_capabilities.zfs_version,
+            "is_accessible": host_capabilities.is_accessible
+        }
+        
+    except Exception as e:
+        result.errors.append(f"❌ Host accessibility check failed: {e}")
+        result.passed = False
+    
+    return result
+
+
 async def validate_migration_target(
     target_host: str,
     target_path: str, 
@@ -601,13 +954,14 @@ async def validate_migration_target(
     4. Sufficient storage space
     5. Target host accessibility
     
+    Benefits of modular design:
+    - Each validation check is isolated and testable
+    - Concurrent validation for better performance
+    - Single Responsibility Principle adherence
+    - Easy to add/modify individual validators
+    
     Returns validation results with detailed status
     """
-    from ...models import HostInfo
-    from ...host_service import HostService
-    
-    host_service = HostService()
-    
     validation_results = {
         "valid": False,
         "target_host": target_host,
@@ -619,98 +973,57 @@ async def validate_migration_target(
     }
     
     try:
-        # 🔍 CHECK 1: Explicit Target Validation
-        if config.require_explicit_target:
-            if not target_path or target_path.strip() == "":
-                validation_results["errors"].append("❌ Target path must be explicitly provided")
-                validation_results["checks"]["explicit_target"] = False
-            elif target_path in [config.default_target_compose_path, config.default_target_appdata_path]:
-                validation_results["warnings"].append(f"⚠️ Using default target path: {target_path}")
-                validation_results["checks"]["explicit_target"] = True
-            else:
-                validation_results["checks"]["explicit_target"] = True
+        # Run all validation checks concurrently for better performance
+        validators = await asyncio.gather(
+            validate_explicit_target(target_path),
+            validate_ssh_connectivity(target_host, ssh_user, ssh_port),
+            validate_directory_permissions(target_host, target_path, ssh_user, ssh_port),
+            validate_storage_space(target_host, target_path, required_space_bytes, ssh_user, ssh_port),
+            validate_host_accessibility(target_host, ssh_user, ssh_port),
+            return_exceptions=True
+        )
         
-        # 🔍 CHECK 2: SSH Connectivity
-        try:
-            ssh_test = await host_service.validate_ssh_connection(target_host, ssh_user, ssh_port)
-            if ssh_test:
-                validation_results["checks"]["ssh_connectivity"] = True
-            else:
-                validation_results["errors"].append(f"❌ Cannot establish SSH connection to {target_host}")
-                validation_results["checks"]["ssh_connectivity"] = False
-        except Exception as e:
-            validation_results["errors"].append(f"❌ SSH connection failed: {e}")
-            validation_results["checks"]["ssh_connectivity"] = False
+        # Process results from each validator
+        validator_names = [
+            "explicit_target", 
+            "ssh_connectivity", 
+            "write_permissions", 
+            "sufficient_storage", 
+            "host_accessible"
+        ]
         
-        # 🔍 CHECK 3: Target Directory Permissions
-        try:
-            # Test if we can create/write to target directory
-            permission_test = await host_service.test_directory_permissions(
-                target_host, target_path, ssh_user, ssh_port
-            )
+        for i, (validator_name, result) in enumerate(zip(validator_names, validators)):
+            # Handle exceptions from individual validators
+            if isinstance(result, Exception):
+                validation_results["errors"].append(f"❌ {validator_name} validation failed: {result}")
+                validation_results["checks"][validator_name] = False
+                continue
             
-            if permission_test.get("writable", False):
-                validation_results["checks"]["write_permissions"] = True
-            else:
-                validation_results["errors"].append(
-                    f"❌ No write permissions to {target_path} on {target_host}"
-                )
-                validation_results["checks"]["write_permissions"] = False
-                
-        except Exception as e:
-            validation_results["errors"].append(f"❌ Permission check failed: {e}")
-            validation_results["checks"]["write_permissions"] = False
-        
-        # 🔍 CHECK 4: Storage Space Validation
-        try:
-            # Create HostInfo object for the call
-            target_host_info = HostInfo(hostname=target_host, ssh_user=ssh_user, ssh_port=ssh_port)
-            storage_results = await host_service.get_storage_info(target_host_info, [target_path])
-            storage_info = storage_results[0] if storage_results else None
-            available_bytes = storage_info.available_bytes if storage_info else 0
-            available_gb = round(available_bytes / (1024**3), 2)
+            # Ensure result is a ValidationResult before accessing its attributes
+            if not isinstance(result, ValidationResult):
+                validation_results["errors"].append(f"❌ {validator_name} returned invalid result type")
+                validation_results["checks"][validator_name] = False
+                continue
             
-            validation_results["available_space_gb"] = available_gb
+            # Aggregate validation results
+            validation_results["checks"][validator_name] = result.passed
+            validation_results["errors"].extend(result.errors)
+            validation_results["warnings"].extend(result.warnings)
             
-            if available_bytes >= required_space_bytes:
-                validation_results["checks"]["sufficient_storage"] = True
-            else:
-                required_gb = round(required_space_bytes / (1024**3), 2)
-                validation_results["errors"].append(
-                    f"❌ Insufficient storage: need {required_gb}GB, have {available_gb}GB"
-                )
-                validation_results["checks"]["sufficient_storage"] = False
-                
-        except Exception as e:
-            validation_results["errors"].append(f"❌ Storage check failed: {e}")
-            validation_results["checks"]["sufficient_storage"] = False
-        
-        # 🔍 CHECK 5: Target Host Accessibility
-        try:
-            # Basic connectivity test
-            host_capabilities = await host_service.check_host_capabilities(
-                HostInfo(hostname=target_host, ssh_user=ssh_user, ssh_port=ssh_port)
-            )
-            
-            validation_results["checks"]["host_accessible"] = host_capabilities.is_accessible
-            if not host_capabilities.is_accessible:
-                validation_results["errors"].append(f"❌ Target host {target_host} is not accessible")
-            
-            # Store host capabilities for reference
-            validation_results["host_capabilities"] = {
-                "has_docker": host_capabilities.has_docker,
-                "has_zfs": host_capabilities.has_zfs,
-                "docker_version": host_capabilities.docker_version,
-                "zfs_version": host_capabilities.zfs_version
-            }
-            
-        except Exception as e:
-            validation_results["errors"].append(f"❌ Host accessibility check failed: {e}")
-            validation_results["checks"]["host_accessible"] = False
+            # Handle special data from specific validators
+            if validator_name == "sufficient_storage" and result.data:
+                validation_results["available_space_gb"] = result.data.get("available_gb", 0)
+            elif validator_name == "host_accessible" and result.data:
+                validation_results["host_capabilities"] = {
+                    "has_docker": result.data.get("has_docker", False),
+                    "has_zfs": result.data.get("has_zfs", False),
+                    "docker_version": result.data.get("docker_version"),
+                    "zfs_version": result.data.get("zfs_version")
+                }
         
         # 🏁 FINAL VALIDATION
         all_checks_passed = all([
-            validation_results["checks"].get("explicit_target", True),  # Optional
+            validation_results["checks"].get("explicit_target", True),  # Optional check
             validation_results["checks"].get("ssh_connectivity", False),
             validation_results["checks"].get("write_permissions", False),
             validation_results["checks"].get("sufficient_storage", False),
@@ -917,6 +1230,12 @@ async def create_safe_rsync_operation(
     - Bandwidth limiting
     - Checksum verification
     - Partial file support
+    - Secure SSH host key verification
+    
+    Security Requirements:
+    - Target host key must be in ~/.ssh/known_hosts
+    - SSH key-based authentication required (no passwords)
+    - Use: ssh-keyscan -p <port> <host> >> ~/.ssh/known_hosts to add host key
     """
     rsync_result = {
         "command": None,
@@ -951,8 +1270,19 @@ async def create_safe_rsync_operation(
             rsync_options.append("--dry-run")
             rsync_options.append("--stats")  # Get statistics in dry run
         
-        # Build SSH command
-        ssh_cmd = f"ssh -p {ssh_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        # Build SSH command with secure host key verification
+        # Note: Host keys must be added to ~/.ssh/known_hosts before migration
+        # Use: ssh-keyscan -p {ssh_port} {target_host} >> ~/.ssh/known_hosts
+        ssh_options = [
+            f"-p {ssh_port}",
+            "-o StrictHostKeyChecking=yes",
+            "-o UserKnownHostsFile=~/.ssh/known_hosts", 
+            "-o PasswordAuthentication=no",  # Force key-based authentication
+            "-o PubkeyAuthentication=yes",   # Enable public key authentication
+            "-o BatchMode=yes",              # Prevent interactive prompts
+            "-o ConnectTimeout=30"           # Set connection timeout
+        ]
+        ssh_cmd = f"ssh {' '.join(ssh_options)}"
         
         # Build full rsync command
         rsync_cmd = [
@@ -964,6 +1294,7 @@ async def create_safe_rsync_operation(
         ]
         
         rsync_result["command"] = " ".join(rsync_cmd)
+        rsync_result["command_args"] = rsync_cmd
         
         # If dry run, execute to get estimates
         if dry_run:
@@ -992,7 +1323,25 @@ async def create_safe_rsync_operation(
                 logger.info(f"✅ Dry run successful: {rsync_result['estimated_files']} files, "
                           f"{rsync_result['estimated_size'] / (1024**3):.2f} GB")
             else:
-                rsync_result["errors"].append(f"Dry run failed: {stderr.decode()}")
+                error_msg = stderr.decode()
+                # Provide helpful guidance for common SSH/host key errors
+                if "Host key verification failed" in error_msg:
+                    rsync_result["errors"].append(
+                        f"Host key verification failed for {target_host}. "
+                        f"Add the host key using: ssh-keyscan -p {ssh_port} {target_host} >> ~/.ssh/known_hosts"
+                    )
+                elif "Permission denied" in error_msg and "publickey" in error_msg:
+                    rsync_result["errors"].append(
+                        f"SSH authentication failed for {target_host}. "
+                        f"Ensure SSH key is properly configured and authorized."
+                    )
+                elif "Connection refused" in error_msg or "No route to host" in error_msg:
+                    rsync_result["errors"].append(
+                        f"Cannot connect to {target_host}:{ssh_port}. "
+                        f"Check host availability and SSH service status."
+                    )
+                else:
+                    rsync_result["errors"].append(f"Dry run failed: {error_msg}")
         
     except Exception as e:
         logger.error(f"Failed to create rsync operation: {e}")
@@ -1080,7 +1429,7 @@ async def generate_source_checksums(
     
     try:
         # Walk through all files
-        for root, dirs, files in os.walk(source_path):
+        for root, _dirs, files in os.walk(source_path):
             for file in files:
                 file_path = os.path.join(root, file)
                 relative_path = os.path.relpath(file_path, source_path)
@@ -1114,6 +1463,61 @@ async def generate_source_checksums(
     return checksum_result
 
 
+async def _verify_single_file_checksum(
+    host_service,
+    host_info,
+    target_path: str,
+    relative_path: str,
+    expected_checksum: str
+) -> dict:
+    """
+    🔐 SAFELY VERIFY CHECKSUM FOR A SINGLE FILE
+    
+    Uses individual secure commands to verify file integrity.
+    Returns detailed result for single file verification.
+    """
+    import shlex
+    
+    result = {
+        "verified": False,
+        "missing": False,
+        "error": None,
+        "actual_checksum": None
+    }
+    
+    try:
+        # Safely escape the file path for shell command
+        safe_file_path = shlex.quote(os.path.join(target_path, relative_path))
+        
+        # Check if file exists first
+        test_cmd = f"test -f {safe_file_path}"
+        test_result = await host_service.run_remote_command(host_info, test_cmd)
+        
+        if test_result[0] != 0:
+            result["missing"] = True
+            return result
+        
+        # Calculate checksum using safe individual command
+        checksum_cmd = f"sha256sum {safe_file_path}"
+        checksum_result = await host_service.run_remote_command(host_info, checksum_cmd)
+        
+        if checksum_result[0] == 0:
+            # Parse checksum output (format: "checksum filename")
+            checksum_output = checksum_result[1].strip()
+            if checksum_output:
+                result["actual_checksum"] = checksum_output.split()[0]
+                result["verified"] = (result["actual_checksum"] == expected_checksum)
+            else:
+                result["error"] = "Empty checksum output"
+        else:
+            result["error"] = f"Checksum command failed: {checksum_result[2]}"
+            
+    except Exception as e:
+        result["error"] = f"Exception during verification: {str(e)}"
+    
+    return result
+
+
 async def verify_target_checksums(
     target_host: str,
     target_path: str,
@@ -1125,10 +1529,12 @@ async def verify_target_checksums(
     """
     🔐 VERIFY CHECKSUMS ON TARGET AFTER TRANSFER
     
-    Ensures data integrity by comparing checksums
+    Ensures data integrity by comparing checksums using secure individual commands.
+    Avoids remote script execution for improved security.
     """
     from ...host_service import HostService
     from ...models import HostInfo
+    import shlex
     
     host_service = HostService()
     
@@ -1143,77 +1549,54 @@ async def verify_target_checksums(
     }
     
     try:
-        # Create remote checksum script
-        script_content = f"""#!/bin/bash
-cd '{target_path}'
-while IFS='  ' read -r expected_sum file_path; do
-    if [ -f "$file_path" ]; then
-        actual_sum=$(sha256sum "$file_path" | awk '{{print $1}}')
-        if [ "$actual_sum" = "$expected_sum" ]; then
-            echo "OK:$file_path"
-        else
-            echo "MISMATCH:$file_path:$expected_sum:$actual_sum"
-        fi
-    else
-        echo "MISSING:$file_path"
-    fi
-done
-"""
+        host_info = HostInfo(hostname=target_host, ssh_user=ssh_user, ssh_port=ssh_port)
         
-        # Create temporary script on target
-        script_path = f"/tmp/verify-checksums-{migration_id}.sh"
-        create_script_cmd = f"cat > {script_path} << 'EOF'\n{script_content}\nEOF"
-        
-        await host_service.run_remote_command(
-            HostInfo(hostname=target_host, ssh_user=ssh_user, ssh_port=ssh_port),
-            create_script_cmd
-        )
-        
-        # Make script executable
-        await host_service.run_remote_command(
-            HostInfo(hostname=target_host, ssh_user=ssh_user, ssh_port=ssh_port),
-            f"chmod +x {script_path}"
-        )
-        
-        # Run verification
-        checksum_data = ""
-        for path, checksum in source_checksums["checksums"].items():
-            checksum_data += f"{checksum}  {path}\n"
-        
-        verify_cmd = f"echo '{checksum_data}' | {script_path}"
-        result = await host_service.run_remote_command(
-            HostInfo(hostname=target_host, ssh_user=ssh_user, ssh_port=ssh_port),
-            verify_cmd
-        )
-        
-        if result[0] == 0:
-            # Parse results
-            for line in result[1].strip().split('\n'):
-                if line.startswith("OK:"):
-                    verification_result["files_checked"] += 1
-                    verification_result["files_matched"] += 1
-                elif line.startswith("MISMATCH:"):
-                    parts = line.split(':')
-                    verification_result["files_checked"] += 1
-                    verification_result["files_mismatched"] += 1
-                    verification_result["mismatched_files"].append(parts[1])
-                elif line.startswith("MISSING:"):
-                    verification_result["missing_files"].append(line.split(':')[1])
+        # Safely verify each file individually without remote script execution
+        for relative_path, expected_checksum in source_checksums["checksums"].items():
+            verification_result["files_checked"] += 1
             
-            verification_result["verified"] = (
-                verification_result["files_mismatched"] == 0 and
-                len(verification_result["missing_files"]) == 0
+            # Use secure helper function for single file verification
+            file_result = await _verify_single_file_checksum(
+                host_service, host_info, target_path, relative_path, expected_checksum
             )
             
-        # Cleanup
-        await host_service.run_remote_command(
-            HostInfo(hostname=target_host, ssh_user=ssh_user, ssh_port=ssh_port),
-            f"rm -f {script_path}"
+            if file_result["missing"]:
+                verification_result["missing_files"].append(relative_path)
+                logger.warning(f"Missing file on target: {relative_path}")
+            elif file_result["error"]:
+                verification_result["errors"].append(
+                    f"Failed to verify {relative_path}: {file_result['error']}"
+                )
+                logger.error(f"Verification error for {relative_path}: {file_result['error']}")
+            elif file_result["verified"]:
+                verification_result["files_matched"] += 1
+                logger.debug(f"✅ Checksum verified: {relative_path}")
+            else:
+                verification_result["files_mismatched"] += 1
+                verification_result["mismatched_files"].append({
+                    "file": relative_path,
+                    "expected": expected_checksum,
+                    "actual": file_result["actual_checksum"]
+                })
+                logger.warning(f"❌ Checksum mismatch: {relative_path} "
+                             f"(expected: {expected_checksum[:8]}..., actual: {file_result['actual_checksum'][:8]}...)")
+        
+        # Final verification status
+        verification_result["verified"] = (
+            verification_result["files_mismatched"] == 0 and
+            len(verification_result["missing_files"]) == 0 and
+            verification_result["files_matched"] > 0
         )
         
+        if verification_result["verified"]:
+            logger.info(f"✅ All {verification_result['files_matched']} files verified successfully")
+        else:
+            logger.warning(f"❌ Verification failed: {verification_result['files_mismatched']} mismatched, "
+                         f"{len(verification_result['missing_files'])} missing")
+            
     except Exception as e:
         logger.error(f"Checksum verification failed: {e}")
-        verification_result["errors"].append(str(e))
+        verification_result["errors"].append(f"Verification process error: {str(e)}")
     
     return verification_result
 
@@ -1265,12 +1648,23 @@ async def resume_interrupted_migration(
             resume_result["errors"].extend(rsync_result["errors"])
             return resume_result
         
-        # Execute rsync
-        process = await asyncio.create_subprocess_shell(
-            rsync_result["command"],
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+        # Execute rsync - use command_args list for security (avoid shell execution)
+        if "command_args" in rsync_result:
+            # Use the safer exec method with argument list
+            process = await asyncio.create_subprocess_exec(
+                *rsync_result["command_args"],
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+        else:
+            # Fallback: parse command string into arguments (for compatibility)
+            import shlex
+            cmd_args = shlex.split(rsync_result["command"])
+            process = await asyncio.create_subprocess_exec(
+                *cmd_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
         
         stdout, stderr = await process.communicate()
         
