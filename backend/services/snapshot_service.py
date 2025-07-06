@@ -6,6 +6,7 @@ from ..models import VolumeMount, HostInfo
 from ..zfs_operations.factories.service_factory import create_default_service_factory
 from ..zfs_operations.services.snapshot_service import SnapshotService as NewSnapshotService
 from ..zfs_operations.core.value_objects.dataset_name import DatasetName
+from ..zfs_operations.infrastructure.command_executor import CommandExecutor
 from ..host_service import HostService
 from ..security_utils import SecurityUtils
 
@@ -19,6 +20,7 @@ class SnapshotService:
         self.host_service = host_service
         self._service_factory = create_default_service_factory()
         self._new_snapshot_service = None
+        self._command_executor = CommandExecutor(timeout=30)
     
     async def _get_new_service(self) -> NewSnapshotService:
         """Get the new snapshot service instance"""
@@ -38,11 +40,13 @@ class SnapshotService:
                 cmd = "zfs list -H -o name,mountpoint"
                 returncode, stdout, stderr = await self.host_service.run_remote_command(host_info, cmd)
             else:
-                # Local command - use SecurityUtils for command execution
+                # Local command - use CommandExecutor for secure execution with timeout
                 validated_cmd = SecurityUtils.validate_zfs_command_args("list", "-H", "-o", "name,mountpoint")
-                # Use subprocess or similar for local execution
-                import subprocess
-                result = subprocess.run(validated_cmd, capture_output=True, text=True)
+                # Extract command and arguments: validated_cmd is ["zfs", "list", "-H", "-o", "name,mountpoint"]
+                command = validated_cmd[0]  # "zfs"
+                args = validated_cmd[1:]    # ["list", "-H", "-o", "name,mountpoint"]
+                
+                result = await self._command_executor.execute_system(command, *args)
                 returncode, stdout, stderr = result.returncode, result.stdout, result.stderr
             
             if returncode != 0:
@@ -176,9 +180,9 @@ class SnapshotService:
             result = await new_service.create_snapshot(dataset_name, snapshot_name)
             if result.is_success:
                 return (result.value.full_name, dataset)
-            else:
-                logger.error(f"Failed to create snapshot for {dataset}: {result.error}")
-                return ("", dataset)
+            
+            logger.error(f"Failed to create snapshot for {dataset}: {result.error}")
+            return ("", dataset)
         except Exception as e:
             logger.error(f"Failed to create snapshot for {dataset}: {e}")
             return ("", dataset)

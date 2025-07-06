@@ -1,5 +1,4 @@
 from fastapi import APIRouter, HTTPException
-from typing import Optional
 
 from ...models import HostInfo, HostValidationRequest, HostCapabilities, StackAnalysis
 from ...host_service import HostService

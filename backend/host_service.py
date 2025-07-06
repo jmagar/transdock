@@ -512,7 +512,7 @@ class HostService:
             )
             
             logger.info(f"Storage validation for {safe_path}: {'✓' if is_valid else '✗'} "
-                       f"(need {format_bytes(total_required)}, have {format_bytes(available_bytes)})")
+                        f"(need {format_bytes(total_required)}, have {format_bytes(available_bytes)})")
             
             return result
             

@@ -262,7 +262,7 @@ async def get_arc_stats(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{pool_name}/scrub", response_model=Dict[str, Any])
+@router.post("/{pool_name}/scrub/start", response_model=Dict[str, Any])
 async def start_pool_scrub(
     pool_name: str,
     pool_service: PoolService = Depends(get_pool_service)

@@ -818,9 +818,9 @@ class PoolService:
     # === Additional methods for router compatibility ===
     
     async def get_zfs_iostat(self, 
-                           pools: Optional[List[str]] = None,
-                           interval: int = 1,
-                           count: int = 1) -> Dict[str, Any]:
+                             pools: Optional[List[str]] = None,
+                             interval: int = 1,
+                             count: int = 1) -> Dict[str, Any]:
         """Get ZFS I/O statistics (wrapper for router compatibility)"""
         try:
             if pools and len(pools) == 1:
@@ -830,8 +830,8 @@ class PoolService:
             
             if result.is_success:
                 return result.value
-            else:
-                return {"error": str(result.error)}
+            
+            return {"error": str(result.error)}
         except Exception as e:
             return {"error": str(e)}
     
@@ -873,7 +873,7 @@ class PoolService:
             result = await self._get_scrub_status(pool_name)
             if result.is_success:
                 return result.value
-            else:
-                return {"error": str(result.error)}
+            
+            return {"error": str(result.error)}
         except Exception as e:
             return {"error": str(e)} 

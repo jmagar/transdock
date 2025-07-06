@@ -1,10 +1,12 @@
 import logging
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Union
 from dataclasses import dataclass
 import contextlib
 import docker
 from docker.errors import DockerException, NotFound
 from .models import VolumeMount
+import os
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +23,8 @@ class ContainerInfo:
     labels: Dict[str, str]
     mounts: List[Dict[str, Any]]
     networks: List[str]
-    environment: Dict[str, str]
-    ports: Dict[str, Any]
+    environment: Union[Dict[str, str], List[str]]
+    ports: Union[Dict[str, Any], List[str]]
     command: List[str]
     working_dir: str
     user: str
@@ -171,6 +173,104 @@ class DockerOperations:
             
         except DockerException as e:
             logger.error(f"Failed to discover containers by labels {label_filters}: {e}")
+            raise
+    
+    async def discover_services_from_compose_file(self, project_path: str) -> Dict[str, Any]:
+        """Discover services, volumes, and networks from a Docker Compose file."""
+        try:
+            compose_file = await self.find_compose_file(project_path)
+            if not compose_file:
+                raise FileNotFoundError(f"No Docker Compose file found in {project_path}")
+
+            compose_data = await self.parse_compose_file(compose_file)
+            
+            services = compose_data.get('services', {})
+            containers = []
+            for service_name, service_def in services.items():
+                # Convert ports from compose format to Docker API format
+                ports_config = service_def.get('ports', [])
+                ports_dict = {}
+                
+                # Handle ports properly - compose files use list format, but Docker API expects dict
+                if isinstance(ports_config, list):
+                    for port_mapping in ports_config:
+                        if isinstance(port_mapping, str):
+                            # Handle string format like "3000:3000" or "8080:8080/tcp"
+                            parts = port_mapping.split(':')
+                            if len(parts) == 2:
+                                host_port, container_port = parts
+                                # Add protocol if missing
+                                if '/' not in container_port:
+                                    container_port += '/tcp'
+                                ports_dict[container_port] = [{"HostIp": "0.0.0.0", "HostPort": host_port}]
+                            elif len(parts) == 1:
+                                # Just expose the port
+                                container_port = parts[0]
+                                if '/' not in container_port:
+                                    container_port += '/tcp'
+                                ports_dict[container_port] = [{"HostIp": "0.0.0.0", "HostPort": ""}]
+                        elif isinstance(port_mapping, dict):
+                            # Handle dict format from compose file
+                            target = port_mapping.get('target', '')
+                            published = port_mapping.get('published', '')
+                            protocol = port_mapping.get('protocol', 'tcp')
+                            container_port = f"{target}/{protocol}"
+                            if published:
+                                ports_dict[container_port] = [{"HostIp": "0.0.0.0", "HostPort": str(published)}]
+                            else:
+                                ports_dict[container_port] = [{"HostIp": "0.0.0.0", "HostPort": ""}]
+                elif isinstance(ports_config, dict):
+                    # Already in dict format
+                    ports_dict = ports_config
+                
+                container_info = ContainerInfo(
+                    id='',  # Not available from compose file
+                    name=f"{os.path.basename(project_path)}_{service_name}_1",
+                    image=service_def.get('image', ''),
+                    image_id='', # Not available
+                    state='exited', # Assume stopped
+                    status='exited',
+                    labels=service_def.get('labels', {}),
+                    mounts=[], # Will be populated by volume extraction
+                    networks=list(service_def.get('networks', {}).keys()),
+                    environment=service_def.get('environment', {}),
+                    ports=ports_dict,
+                    command=service_def.get('command', []),
+                    working_dir=service_def.get('working_dir', ''),
+                    user=service_def.get('user', ''),
+                    restart_policy=service_def.get('restart', {}),
+                    created='',
+                    project_name=os.path.basename(project_path),
+                    service_name=service_name
+                )
+                containers.append(container_info)
+
+            volumes = await self.extract_volume_mounts(compose_data)
+            
+            networks = []
+            compose_networks = compose_data.get('networks', {})
+            if compose_networks:
+                for network_name, net_def in compose_networks.items():
+                    networks.append(NetworkInfo(
+                        id='', # Not available
+                        name=f"{os.path.basename(project_path)}_{network_name}",
+                        driver=net_def.get('driver', 'bridge') if net_def else 'bridge',
+                        scope='local',
+                        attachable=net_def.get('attachable', False) if net_def else False,
+                        ingress=False,
+                        internal=net_def.get('internal', False) if net_def else False,
+                        labels=net_def.get('labels', {}) if net_def else {},
+                        options=net_def.get('driver_opts', {}) if net_def else {}
+                    ))
+
+            return {
+                "containers": containers,
+                "volumes": volumes,
+                "networks": networks
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to discover services from compose file {project_path}: {e}")
             raise
     
     def _extract_container_info(self, container) -> ContainerInfo:
@@ -445,69 +545,67 @@ class DockerOperations:
 
     def _build_container_config(self, container_info: ContainerInfo, 
                                volume_mapping: Dict[str, str]) -> Dict[str, Any]:
-        """Build container configuration for Docker API"""
-        config = {
-            'image': container_info.image,
-            'name': container_info.name,
-            'detach': True,
-            'environment': container_info.environment,
-            'labels': container_info.labels,
-            'command': container_info.command if container_info.command else None,
-            'working_dir': container_info.working_dir if container_info.working_dir else None,
-            'user': container_info.user if container_info.user else None,
-        }
+        """Build the container create configuration from ContainerInfo"""
         
-        # Add volumes with updated paths
-        volumes = {}
-        for mount in container_info.mounts:
-            if mount['Type'] == 'bind':
-                old_source = mount['Source']
-                new_source = volume_mapping.get(old_source, old_source)
-                destination = mount['Destination']
-                
-                # Add read-only flag if present
-                mode = 'ro' if mount.get('RW', True) is False else 'rw'
-                volumes[new_source] = {'bind': destination, 'mode': mode}
+        # Build volume bindings
+        binds = {}
+        for source, target in volume_mapping.items():
+            binds[source] = {
+                "bind": target,
+                "mode": "rw" # Assuming read-write, can be made more flexible
+            }
         
-        if volumes:
-            config['volumes'] = volumes
-        
-        # Add ports
-        ports = {}
+        # Build environment variables, handling both list and dict formats
+        environment = {}
+        if isinstance(container_info.environment, dict):
+            environment = container_info.environment
+        elif isinstance(container_info.environment, list):
+            for env_var in container_info.environment:
+                if '=' in env_var:
+                    key, value = env_var.split('=', 1)
+                    environment[key] = value
+
+        # Build port bindings, handling both list and dict formats
         port_bindings = {}
-        for container_port, host_configs in container_info.ports.items():
-            if host_configs:
-                for host_config in host_configs:
-                    host_port = host_config['HostPort']
-                    host_ip = host_config.get('HostIp', '')
-                    
-                    if host_ip:
-                        port_bindings[container_port] = [(host_ip, host_port)]
-                    else:
-                        port_bindings[container_port] = host_port
-                    
-                    ports[container_port] = None
-        
-        if ports:
-            config['ports'] = ports
-        if port_bindings:
-            config['port_bindings'] = port_bindings
-        
-        # Add restart policy
-        restart_policy = container_info.restart_policy
-        if restart_policy.get('Name') and restart_policy['Name'] != 'no':
-            policy_name = restart_policy['Name']
-            if policy_name == 'on-failure' and restart_policy.get('MaximumRetryCount'):
-                config['restart_policy'] = {
-                    'Name': policy_name,
-                    'MaximumRetryCount': restart_policy['MaximumRetryCount']
-                }
-            else:
-                config['restart_policy'] = {'Name': policy_name}
-        
-        # Add networks (only first network, others added separately)
-        if container_info.networks and container_info.networks[0] != 'bridge':
-            config['network'] = container_info.networks[0]
+        if isinstance(container_info.ports, list):
+            for port_mapping in container_info.ports:
+                parts = str(port_mapping).split(':')
+                if len(parts) == 2:
+                    host_port, container_port = parts
+                    # Add protocol if missing
+                    if '/' not in container_port:
+                        container_port += '/tcp'
+                    port_bindings[container_port] = host_port
+                elif len(parts) == 1:
+                    container_port = parts[0]
+                    if '/' not in container_port:
+                        container_port += '/tcp'
+                    port_bindings[container_port] = None # Expose port
+        elif isinstance(container_info.ports, dict):
+            # Convert Docker API format to Docker client create format
+            for container_port, host_bindings in container_info.ports.items():
+                if host_bindings and isinstance(host_bindings, list) and len(host_bindings) > 0:
+                    host_port = host_bindings[0].get('HostPort', '')
+                    port_bindings[container_port] = host_port if host_port else None
+                else:
+                    port_bindings[container_port] = None
+
+        config = {
+            "name": container_info.name,
+            "image": container_info.image,
+            "labels": container_info.labels,
+            "environment": environment,
+            "host_config": self.client.api.create_host_config(
+                binds=binds,
+                port_bindings=port_bindings,
+                restart_policy=container_info.restart_policy
+            ),
+            "command": container_info.command,
+            "working_dir": container_info.working_dir,
+            "user": container_info.user,
+            "tty": True,
+            "stdin_open": True
+        }
         
         return config
     
@@ -643,7 +741,6 @@ class DockerOperations:
 
     async def find_compose_file(self, project_path: str) -> Optional[str]:
         """Find a Docker Compose file in the given directory"""
-        import os
         compose_files = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']
         
         for compose_file in compose_files:
@@ -655,8 +752,6 @@ class DockerOperations:
 
     async def parse_compose_file(self, compose_file_path: str) -> Dict[str, Any]:
         """Parse a Docker Compose file and return its contents"""
-        import yaml
-        
         try:
             with open(compose_file_path, 'r') as f:
                 return yaml.safe_load(f) or {}
@@ -666,7 +761,6 @@ class DockerOperations:
 
     async def extract_volume_mounts(self, compose_data: Dict[str, Any]) -> List[VolumeMount]:
         """Extract volume mounts from parsed compose data"""
-        import os
         volumes = []
         
         services = compose_data.get('services', {})

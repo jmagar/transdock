@@ -417,8 +417,53 @@ async def smart_migration(
     except SecurityValidationError as e:
         raise HTTPException(status_code=422, detail=f"Security validation failed: {e}") from e
     except Exception as e:
-        logger.error(f"Smart migration failed: {e}")
+        logger.error(f"Smart migration failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Smart migration failed: {e}") from e
+
+
+@router.post("/compose-from-path")
+async def start_compose_migration_from_path(
+    project_path: str,
+    target_host: str,
+    target_base_path: str,
+    ssh_user: str = "root",
+    ssh_port: int = 22,
+    force_rsync: bool = False,
+    auto_start: bool = True
+):
+    """
+    Start a compose project migration from a direct file path.
+    This provides a clean, direct path for file-based migrations.
+    """
+    try:
+        from ...models import ContainerMigrationRequest, IdentifierType
+        
+        container_request = ContainerMigrationRequest(
+            container_identifier=project_path,
+            identifier_type=IdentifierType.PROJECT,
+            label_filters=None,
+            target_host=target_host,
+            target_base_path=target_base_path,
+            ssh_user=ssh_user,
+            ssh_port=ssh_port,
+            force_rsync=force_rsync,
+            source_host=None  # Local source
+        )
+        
+        migration_id = await migration_service.start_container_migration(container_request)
+        
+        return {
+            "migration_id": migration_id,
+            "status": "started", 
+            "message": f"Compose project migration started for {os.path.basename(project_path)}",
+            "project_path": project_path,
+            "target_host": target_host,
+            "auto_start": auto_start
+        }
+    except Exception as e:
+        logger.error(f"Compose migration from path failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Compose migration from path failed: {e}") from e
+
 
 # Container Migration Endpoints
 
