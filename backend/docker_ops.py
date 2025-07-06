@@ -224,8 +224,8 @@ class DockerOperations:
             raise
 
     async def get_container_volumes(self, container_info: ContainerInfo,
-                                  host: Optional[str] = None,
-                                  ssh_user: str = "root") -> List[VolumeMount]:
+                                    host: Optional[str] = None,
+                                    ssh_user: str = "root") -> List[VolumeMount]:
         """Extract volume mounts from container information"""
         client = None
         volume_mounts = []
@@ -670,35 +670,82 @@ class DockerOperations:
         volumes = []
         
         services = compose_data.get('services', {})
-        for service_name, service_config in services.items():
+        
+        # Early return if no services defined
+        if not services:
+            return volumes
+            
+        compose_dir = os.path.dirname(os.path.abspath(compose_data.get('_compose_file_path', '')))
+        
+        for service_config in services.values():
             service_volumes = service_config.get('volumes', [])
             
-            for volume in service_volumes:
-                if isinstance(volume, str):
-                    # Handle string format: "host_path:container_path"
-                    if ':' in volume:
-                        parts = volume.split(':')
-                        if len(parts) >= 2:
-                            host_path = parts[0]
-                            container_path = parts[1]
-                            
-                            # Expand relative paths to absolute
-                            if not os.path.isabs(host_path):
-                                compose_dir = os.path.dirname(os.path.abspath(compose_data.get('_compose_file_path', '')))
-                                host_path = os.path.join(compose_dir, host_path)
-                            
-                            volumes.append(VolumeMount(source=host_path, target=container_path))
+            # Skip services without volumes
+            if not service_volumes:
+                continue
                 
-                elif isinstance(volume, dict):
-                    # Handle dictionary format: {"source": "host_path", "target": "container_path"}
-                    source = volume.get('source', '')
-                    target = volume.get('target', '')
+            for volume in service_volumes:
+                volume_mount = self._parse_volume_definition(volume, compose_dir)
+                # Use guard clause to handle invalid volume mounts
+                if not volume_mount:
+                    continue
                     
-                    if source and target:
-                        if not os.path.isabs(source):
-                            compose_dir = os.path.dirname(os.path.abspath(compose_data.get('_compose_file_path', '')))
-                            source = os.path.join(compose_dir, source)
-                        
-                        volumes.append(VolumeMount(source=source, target=target))
+                volumes.append(volume_mount)
         
         return volumes
+    
+    def _parse_volume_definition(self, volume: Any, compose_dir: str) -> Optional[VolumeMount]:
+        """Parse a single volume definition from compose data"""
+        import os
+        
+        # Handle string format volumes
+        if isinstance(volume, str):
+            return self._parse_string_volume(volume, compose_dir)
+            
+        # Handle dictionary format volumes
+        if isinstance(volume, dict):
+            return self._parse_dict_volume(volume, compose_dir)
+        
+        # Log unsupported formats and return None
+        logger.warning(f"Unsupported volume format: {type(volume)}")
+        return None
+    
+    def _parse_string_volume(self, volume: str, compose_dir: str) -> Optional[VolumeMount]:
+        """Parse string format volume: 'host_path:container_path'"""
+        import os
+        
+        # Guard clause: volume must contain colon separator
+        if ':' not in volume:
+            return None
+            
+        parts = volume.split(':')
+        
+        # Guard clause: must have at least host and container paths
+        if len(parts) < 2:
+            return None
+            
+        host_path = parts[0]
+        container_path = parts[1]
+        
+        # Expand relative paths to absolute
+        if not os.path.isabs(host_path):
+            host_path = os.path.join(compose_dir, host_path)
+        
+        return VolumeMount(source=host_path, target=container_path)
+    
+    def _parse_dict_volume(self, volume: Dict[str, Any], compose_dir: str) -> Optional[VolumeMount]:
+        """Parse dictionary format volume: {'source': 'host_path', 'target': 'container_path'}"""
+        import os
+        
+        source = volume.get('source', '')
+        target = volume.get('target', '')
+        
+        # Guard clause: both source and target must be specified
+        if not source or not target:
+            return None
+            
+        # Expand relative paths to absolute
+        if not os.path.isabs(source):
+            source = os.path.join(compose_dir, source)
+        
+        return VolumeMount(source=source, target=target)

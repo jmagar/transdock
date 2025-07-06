@@ -572,4 +572,35 @@ class DatasetService:
             return Result.failure(DatasetException(
                 f"Failed to parse usage info: {str(e)}",
                 error_code="DATASET_USAGE_PARSE_FAILED"
-            )) 
+            ))
+    
+    # === Additional methods for router compatibility ===
+    
+    async def monitor_dataset_performance(self, dataset_name: str, duration_seconds: int = 30) -> Dict[str, Any]:
+        """Monitor performance metrics for a specific dataset (wrapper for router compatibility)"""
+        try:
+            name = DatasetName.from_string(dataset_name)
+            
+            # Get initial usage
+            initial_usage = await self.get_usage(name)
+            if initial_usage.is_failure:
+                return {"error": str(initial_usage.error)}
+            
+            # For now, return basic performance data
+            # In a real implementation, you might collect metrics over time
+            performance_data = {
+                "dataset": dataset_name,
+                "duration_seconds": duration_seconds,
+                "usage": initial_usage.value,
+                "timestamp": datetime.now().isoformat(),
+                "performance_metrics": {
+                    "read_ops": 0,  # Would need actual monitoring
+                    "write_ops": 0,
+                    "read_bandwidth": 0,
+                    "write_bandwidth": 0
+                }
+            }
+            
+            return performance_data
+        except Exception as e:
+            return {"error": str(e)} 

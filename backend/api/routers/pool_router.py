@@ -1,7 +1,7 @@
 """
 Pool API router using the new service layer.
 """
-from typing import Optional
+from typing import Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, Query
 
 from ..dependencies import get_pool_service
@@ -11,6 +11,10 @@ from ..models import (
 )
 
 from ...zfs_operations.services.pool_service import PoolService
+from ...security_utils import SecurityValidationError
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api/v1/pools", tags=["pools"])
@@ -213,4 +217,86 @@ async def import_pool(
                 detail=f"Failed to import pool: {result.error}"
             )
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/performance/iostat", response_model=Dict[str, Any])
+async def get_iostat(
+    pools: Optional[str] = Query(None, description="Comma-separated list of pools"),
+    interval: int = Query(1, description="Interval in seconds"),
+    count: int = Query(5, description="Number of samples"),
+    pool_service: PoolService = Depends(get_pool_service)
+):
+    """Get ZFS I/O statistics"""
+    try:
+        pool_list = pools.split(",") if pools else None
+        iostat = await pool_service.get_zfs_iostat(pool_list, interval, count)
+        
+        if not iostat:
+            raise HTTPException(status_code=404, detail="Failed to get iostat for specified pools")
+        
+        return iostat
+    except SecurityValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error getting iostat: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/performance/arc", response_model=Dict[str, Any])
+async def get_arc_stats(
+    pool_service: PoolService = Depends(get_pool_service)
+):
+    """Get ZFS ARC (Adaptive Replacement Cache) statistics"""
+    try:
+        arc_stats = await pool_service.get_arc_stats()
+        
+        if not arc_stats:
+            raise HTTPException(status_code=404, detail="Failed to get ARC statistics")
+        
+        return arc_stats
+    except SecurityValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error getting ARC stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{pool_name}/scrub", response_model=Dict[str, Any])
+async def start_pool_scrub(
+    pool_name: str,
+    pool_service: PoolService = Depends(get_pool_service)
+):
+    """Start a scrub operation on a ZFS pool"""
+    try:
+        success = await pool_service.start_pool_scrub(pool_name)
+        
+        if not success:
+            raise HTTPException(status_code=400, detail="Failed to start pool scrub")
+        
+        return {"pool": pool_name, "scrub_started": True}
+    except SecurityValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error starting pool scrub: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{pool_name}/scrub/status", response_model=Dict[str, Any])
+async def get_pool_scrub_status(
+    pool_name: str,
+    pool_service: PoolService = Depends(get_pool_service)
+):
+    """Get the status of a scrub operation on a ZFS pool"""
+    try:
+        scrub_status = await pool_service.get_pool_scrub_status(pool_name)
+        
+        if not scrub_status:
+            raise HTTPException(status_code=404, detail="Failed to get scrub status")
+        
+        return {"pool": pool_name, "scrub_status": scrub_status}
+    except SecurityValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Security validation failed: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error getting scrub status: {e}")
         raise HTTPException(status_code=500, detail=str(e)) 

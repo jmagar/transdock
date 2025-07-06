@@ -24,42 +24,55 @@ import time
 
 logger = logging.getLogger(__name__)
 
-# Security configuration
-SECRET_KEY = secrets.token_urlsafe(32)  # Generate a secure secret key
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-REFRESH_TOKEN_EXPIRE_DAYS = 7
+# Import configuration
+from ..config import get_config
+
+# Get configuration instance
+config = get_config()
+
+# Security configuration (using config)
+SECRET_KEY = config.jwt_secret_key
+ALGORITHM = config.jwt_algorithm
+ACCESS_TOKEN_EXPIRE_MINUTES = config.access_token_expire_minutes
+REFRESH_TOKEN_EXPIRE_DAYS = config.refresh_token_expire_days
 
 # Password context for hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def get_default_password(env_var: str, username: str) -> str:
     """
-    Get default password from environment variable.
+    Get default password from configuration.
     
     Args:
-        env_var: Environment variable name
-        username: Username for error messages
+        env_var: Environment variable name (for backward compatibility)
+        username: Username for which to get password
         
     Returns:
-        str: Password from environment variable
+        str: Password from configuration
         
     Raises:
-        RuntimeError: If environment variable is not set
+        RuntimeError: If password is not available
     """
-    password = os.getenv(env_var)
-    if not password:
-        error_msg = (
-            f"Environment variable '{env_var}' not set. "
-            f"Please set a secure password for the default '{username}' user. "
-            f"Example: export {env_var}='your_secure_password'"
-        )
-        logger.error(error_msg)
-        raise RuntimeError(error_msg)
+    # Get password based on username from configuration
+    if username == "admin":
+        password = config.admin_password
+    elif username == "user":
+        password = config.user_password
+    else:
+        # Fallback to environment variable for custom users
+        password = os.getenv(env_var)
+        if not password:
+            error_msg = (
+                f"Environment variable '{env_var}' not set. "
+                f"Please set a secure password for the '{username}' user. "
+                f"Example: export {env_var}='your_secure_password'"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
     
     if len(password) < 8:
         error_msg = (
-            f"Password in environment variable '{env_var}' is too short. "
+            f"Password for user '{username}' is too short. "
             f"Please use a password with at least 8 characters for security."
         )
         logger.error(error_msg)

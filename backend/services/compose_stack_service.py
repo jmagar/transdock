@@ -2,7 +2,6 @@ import os
 import logging
 from typing import List, Dict, Any, Optional
 from ..docker_ops import DockerOperations
-from ..zfs_ops import ZFSOperations
 from ..security_utils import SecurityUtils, SecurityValidationError
 
 logger = logging.getLogger(__name__)
@@ -11,10 +10,14 @@ logger = logging.getLogger(__name__)
 class ComposeStackService:
     """Handles legacy Docker Compose stack operations for backward compatibility"""
     
-    def __init__(self, docker_ops: DockerOperations, zfs_ops: ZFSOperations):
+    def __init__(self, docker_ops: DockerOperations):
+        from ..config import get_config
+        
         self.docker_ops = docker_ops
-        self.zfs_ops = zfs_ops
-        self.compose_base_path = os.getenv("TRANSDOCK_COMPOSE_BASE", "/mnt/cache/compose")
+        
+        # Use configuration instead of direct environment variable access
+        config = get_config()
+        self.compose_base_path = config.transdock_compose_base
     
     def _is_valid_stack_name(self, name: str) -> bool:
         """Validate stack name for security."""

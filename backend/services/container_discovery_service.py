@@ -80,17 +80,17 @@ class ContainerDiscoveryService:
             # Get detailed container information using unified Docker API
             if identifier_type == IdentifierType.PROJECT:
                 containers = await self.docker_ops.discover_containers_by_project(
-                    container_identifier, source_host
+                    container_identifier, source_host, "root"
                 )
             elif identifier_type == IdentifierType.NAME:
                 containers = await self.docker_ops.discover_containers_by_name(
-                    container_identifier, source_host
+                    container_identifier, source_host, "root"
                 )
             else:
                 if not label_filters:
                     raise ValueError("Label filters required when using labels identifier type")
                 containers = await self.docker_ops.discover_containers_by_labels(
-                    label_filters, source_host
+                    label_filters, source_host, "root"
                 )
 
             # Analyze containers
@@ -102,7 +102,7 @@ class ContainerDiscoveryService:
             recommendations = []
 
             for container in containers:
-                volumes = await self.docker_ops.get_container_volumes(container, source_host)
+                volumes = await self.docker_ops.get_container_volumes(container, source_host, "root")
                 bind_mounts = [v for v in volumes if v.source.startswith('/')]
                 
                 container_summary = ContainerSummary(

@@ -1,7 +1,7 @@
 """
 Snapshot API router using the new service layer.
 """
-from typing import Optional
+from typing import Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, Query
 
 from ..dependencies import get_snapshot_service
@@ -12,8 +12,10 @@ from ..models import (
 from ..middleware import create_error_response
 from ...zfs_operations.services.snapshot_service import SnapshotService
 from ...zfs_operations.core.value_objects.dataset_name import DatasetName
+from ...security_utils import SecurityValidationError
+import logging
 
-
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/snapshots", tags=["snapshots"])
 
@@ -204,4 +206,7 @@ async def apply_retention_policy(
                 detail=f"Failed to apply retention policy: {result.error}"
             )
     except Exception as e:
-        return create_error_response(e) 
+        return create_error_response(e)
+
+
+ 

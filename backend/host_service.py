@@ -76,17 +76,23 @@ class HostService:
         )
         
         try:
-            # Check Docker availability
+            # Check Docker availability and version
             returncode, stdout, stderr = await self.run_remote_command(
                 host_info, "docker --version"
             )
             capabilities.docker_available = returncode == 0
+            if capabilities.docker_available and stdout:
+                # Extract version from output like "Docker version 20.10.21, build baeda1f"
+                capabilities.docker_version = stdout.strip()
             
-            # Check ZFS availability
+            # Check ZFS availability and version
             returncode, stdout, stderr = await self.run_remote_command(
                 host_info, "zfs version"
             )
             capabilities.zfs_available = returncode == 0
+            if capabilities.zfs_available and stdout:
+                # Extract version from zfs version output
+                capabilities.zfs_version = stdout.strip().split('\n')[0]  # Take first line
             
             # If ZFS is available, get pools
             if capabilities.zfs_available:
@@ -670,7 +676,7 @@ class HostService:
             return False
 
     async def test_directory_permissions(self, target_host: str, target_path: str, 
-                                       ssh_user: str = "root", ssh_port: int = 22) -> dict:
+                                         ssh_user: str = "root", ssh_port: int = 22) -> dict:
         """Test directory permissions on target host"""
         result = {
             "writable": False,

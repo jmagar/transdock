@@ -43,7 +43,7 @@ TransDock prioritizes **Docker Compose projects** over individual containers:
 
 ### Core Services (Single Responsibility Pattern)
 
-```
+```text
 📁 backend/
 ├── migration_service.py                 # 266 lines - Facade coordinator
 ├── services/

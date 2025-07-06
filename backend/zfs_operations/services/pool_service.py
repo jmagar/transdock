@@ -813,4 +813,67 @@ class PoolService:
             return Result.failure(PoolException(
                 f"Failed to parse pool history: {str(e)}",
                 error_code="POOL_HISTORY_PARSE_FAILED"
-            )) 
+            ))
+    
+    # === Additional methods for router compatibility ===
+    
+    async def get_zfs_iostat(self, 
+                           pools: Optional[List[str]] = None,
+                           interval: int = 1,
+                           count: int = 1) -> Dict[str, Any]:
+        """Get ZFS I/O statistics (wrapper for router compatibility)"""
+        try:
+            if pools and len(pools) == 1:
+                result = await self.get_iostat(pools[0], interval, count)
+            else:
+                result = await self.get_iostat(None, interval, count)
+            
+            if result.is_success:
+                return result.value
+            else:
+                return {"error": str(result.error)}
+        except Exception as e:
+            return {"error": str(e)}
+    
+    async def get_arc_stats(self) -> Dict[str, Any]:
+        """Get ZFS ARC statistics"""
+        try:
+            # Read ARC stats from /proc/spl/kstat/zfs/arcstats
+            result = await self._executor.execute_system("cat", "/proc/spl/kstat/zfs/arcstats")
+            
+            if not result.success:
+                return {"error": "Failed to read ARC stats"}
+            
+            arc_stats = {}
+            for line in result.stdout.strip().split('\n'):
+                if line.strip() and not line.startswith('#'):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        arc_stats[parts[0]] = {
+                            "type": parts[1],
+                            "data": parts[2]
+                        }
+            
+            return arc_stats
+        except Exception as e:
+            return {"error": str(e)}
+    
+    async def start_pool_scrub(self, pool_name: str) -> bool:
+        """Start pool scrub (wrapper for router compatibility)"""
+        try:
+            result = await self.start_scrub(pool_name)
+            return result.is_success
+        except Exception as e:
+            self._logger.error(f"Failed to start pool scrub: {e}")
+            return False
+    
+    async def get_pool_scrub_status(self, pool_name: str) -> Dict[str, Any]:
+        """Get pool scrub status (wrapper for router compatibility)"""
+        try:
+            result = await self._get_scrub_status(pool_name)
+            if result.is_success:
+                return result.value
+            else:
+                return {"error": str(result.error)}
+        except Exception as e:
+            return {"error": str(e)} 
