@@ -78,3 +78,13 @@ class MigrationRepository(ABC):
     async def cleanup_old_migrations(self, keep_days: int = 30) -> int:
         """Clean up old completed migrations"""
         pass
+    
+    @abstractmethod
+    async def store_compose_content(self, migration_id: str, compose_content: str, env_content: Optional[str] = None, project_name: Optional[str] = None) -> bool:
+        """Store Docker Compose file content for migration"""
+        pass
+    
+    @abstractmethod
+    async def get_compose_content(self, migration_id: str) -> Optional[Dict[str, Any]]:
+        """Get Docker Compose file content for migration"""
+        pass
