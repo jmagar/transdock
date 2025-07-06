@@ -218,6 +218,11 @@ class ZFSPool:
         return None
     
     @property
+    def used_size(self) -> Optional[StorageSize]:
+        """Get used space - alias for allocated_size"""
+        return self.allocated_size
+    
+    @property
     def free_size(self) -> Optional[StorageSize]:
         """Get free space"""
         free_str = self.properties.get('free')
@@ -226,9 +231,13 @@ class ZFSPool:
         return None
     
     @property
-    def health(self) -> str:
+    def health(self) -> ZFSPoolStatus:
         """Get pool health status"""
-        return self.properties.get('health', 'UNKNOWN')
+        health_str = self.properties.get('health', 'UNKNOWN')
+        try:
+            return ZFSPoolStatus(health_str)
+        except ValueError:
+            return ZFSPoolStatus.OFFLINE
     
     @property
     def capacity_percentage(self) -> float:
@@ -239,9 +248,33 @@ class ZFSPool:
         except (ValueError, AttributeError):
             return 0.0
     
+    @property
+    def version(self) -> Optional[str]:
+        """Get pool version"""
+        return self.properties.get('version')
+    
+    @property
+    def guid(self) -> Optional[str]:
+        """Get pool GUID"""
+        return self.properties.get('guid')
+    
+    @property
+    def altroot(self) -> Optional[str]:
+        """Get pool altroot"""
+        return self.properties.get('altroot')
+    
+    @property
+    def readonly(self) -> bool:
+        """Check if pool is readonly"""
+        return self.properties.get('readonly', 'off') == 'on'
+    
+    def usage_percentage(self) -> float:
+        """Get usage percentage"""
+        return self.capacity_percentage
+    
     def is_healthy(self) -> bool:
         """Check if pool is healthy"""
-        return self.status == ZFSPoolStatus.ONLINE and self.health == 'ONLINE'
+        return self.status == ZFSPoolStatus.ONLINE and self.health == ZFSPoolStatus.ONLINE
     
     def is_degraded(self) -> bool:
         """Check if pool is degraded"""
@@ -250,6 +283,34 @@ class ZFSPool:
     def is_faulted(self) -> bool:
         """Check if pool is faulted"""
         return self.status == ZFSPoolStatus.FAULTED
+    
+    def has_errors(self) -> bool:
+        """Check if pool has errors"""
+        return self.status in [ZFSPoolStatus.DEGRADED, ZFSPoolStatus.FAULTED]
+    
+    def needs_attention(self) -> bool:
+        """Check if pool needs attention"""
+        return not self.is_healthy()
+    
+    def can_be_exported(self) -> bool:
+        """Check if pool can be exported"""
+        return self.is_healthy() and not self.readonly
+    
+    def dedup_ratio(self) -> float:
+        """Get deduplication ratio"""
+        dedup_str = self.properties.get('dedupratio', '1.00x')
+        try:
+            return float(dedup_str.replace('x', ''))
+        except (ValueError, AttributeError):
+            return 1.0
+    
+    def compression_ratio(self) -> float:
+        """Get compression ratio"""
+        compression_str = self.properties.get('compressratio', '1.00x')
+        try:
+            return float(compression_str.replace('x', ''))
+        except (ValueError, AttributeError):
+            return 1.0
     
     def has_sufficient_space(self, required: StorageSize) -> bool:
         """Check if pool has sufficient free space"""
@@ -261,9 +322,15 @@ class ZFSPool:
         return {
             'total': self.total_size,
             'allocated': self.allocated_size,
+            'used': self.used_size,
             'free': self.free_size,
             'capacity_percentage': self.capacity_percentage,
-            'health': self.health,
+            'health': self.health.value,
             'status': self.status.value,
-            'dataset_count': len(self.datasets)
+            'dataset_count': len(self.datasets),
+            'version': self.version,
+            'guid': self.guid,
+            'readonly': self.readonly,
+            'dedup_ratio': self.dedup_ratio(),
+            'compression_ratio': self.compression_ratio()
         }
