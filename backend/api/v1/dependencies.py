@@ -14,6 +14,7 @@ from ...application.zfs.dataset_management_service import DatasetManagementServi
 from ...application.zfs.snapshot_management_service import SnapshotManagementService
 from ...application.zfs.pool_management_service import PoolManagementService
 from ...application.docker.docker_management_service import DockerManagementService
+from ...application.docker.container_management_service import ContainerManagementService
 from ...application.migration.migration_orchestration_service import MigrationOrchestrationService
 
 # For now, we'll create mock implementations for Docker repositories
@@ -22,6 +23,8 @@ from ...core.interfaces.docker_repository import (
     DockerContainerRepository, DockerImageRepository, DockerNetworkRepository,
     DockerComposeRepository, DockerVolumeRepository, DockerHostRepository
 )
+
+from ...infrastructure.docker.repositories.docker_container_repository_impl import DockerContainerRepositoryImpl  # real
 
 
 # Database session dependency
@@ -95,6 +98,23 @@ async def get_docker_service() -> DockerManagementService:
         volume_repository=MockDockerVolumeRepository(),
         host_repository=MockDockerHostRepository()
     )
+
+
+# Container dependencies
+async def get_container_repository() -> DockerContainerRepository:
+    """Return real Docker container repository (local engine)."""
+    try:
+        return DockerContainerRepositoryImpl()
+    except Exception:
+        # Fallback to mock when docker engine unavailable
+        from .mock_repositories import MockDockerContainerRepository
+        return MockDockerContainerRepository()
+
+
+async def get_container_service(
+    repo: DockerContainerRepository = Depends(get_container_repository)
+) -> ContainerManagementService:
+    return ContainerManagementService(repo)
 
 
 async def get_migration_service(

@@ -3,6 +3,7 @@
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import docker
+from docker import errors as docker_errors
 
 from ....core.interfaces.docker_repository import DockerContainerRepository
 from ....core.entities.docker_entity import (
@@ -96,7 +97,7 @@ class DockerContainerRepositoryImpl(DockerContainerRepository):
         try:
             container = self._client.containers.get(container_id)
             return self._to_entity(container)
-        except docker.errors.NotFound:
+        except docker_errors.NotFound:
             return None
 
     async def find_by_name(self, name: str, host: Optional[HostConnection] = None) -> Optional[DockerContainer]:
@@ -110,7 +111,7 @@ class DockerContainerRepositoryImpl(DockerContainerRepository):
         try:
             self._client.containers.get(container_id).start()
             return True
-        except docker.errors.APIError as e:
+        except docker_errors.APIError as e:
             logger.error(f"Failed to start container {container_id}: {e}")
             return False
 
@@ -118,7 +119,7 @@ class DockerContainerRepositoryImpl(DockerContainerRepository):
         try:
             self._client.containers.get(container_id).stop(timeout=timeout)
             return True
-        except docker.errors.APIError as e:
+        except docker_errors.APIError as e:
             logger.error(f"Failed to stop container {container_id}: {e}")
             return False
 
@@ -126,15 +127,19 @@ class DockerContainerRepositoryImpl(DockerContainerRepository):
         try:
             self._client.containers.get(container_id).remove(force=force)
             return True
-        except docker.errors.APIError as e:
+        except docker_errors.APIError as e:
             logger.error(f"Failed to remove container {container_id}: {e}")
             return False
 
     async def get_logs(self, container_id: str, tail: Optional[int] = None, host: Optional[HostConnection] = None) -> str:
         try:
-            logs = self._client.containers.get(container_id).logs(tail=tail)
-            return logs.decode()
-        except docker.errors.APIError as e:
+            logs = self._client.containers.get(container_id).logs(tail=tail if tail is not None else "all")
+            if isinstance(logs, bytes):
+                logs_decoded = logs.decode()
+            else:
+                logs_decoded = str(logs)
+            return logs_decoded
+        except docker_errors.APIError as e:
             logger.error(f"Failed to get logs for {container_id}: {e}")
             return ""
 
@@ -142,7 +147,7 @@ class DockerContainerRepositoryImpl(DockerContainerRepository):
         try:
             stats = self._client.containers.get(container_id).stats(stream=False)
             return stats
-        except docker.errors.APIError as e:
+        except docker_errors.APIError as e:
             logger.error(f"Failed to get stats for {container_id}: {e}")
             return {}
 
@@ -152,6 +157,6 @@ class DockerContainerRepositoryImpl(DockerContainerRepository):
             exec_id = self._client.api.exec_create(cont.id, command)
             output = self._client.api.exec_start(exec_id).decode()
             return output
-        except docker.errors.APIError as e:
+        except docker_errors.APIError as e:
             logger.error(f"Failed to exec in {container_id}: {e}")
             return ""
