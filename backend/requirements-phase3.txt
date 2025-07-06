@@ -14,3 +14,6 @@ greenlet==3.0.1
 
 # YAML parsing for compose files
 pyyaml==6.0.1
+
+# Docker SDK
+docker==6.1.3

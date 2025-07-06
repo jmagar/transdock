@@ -10,7 +10,7 @@ from ...core.interfaces.docker_repository import (
 )
 from ...core.entities.docker_entity import (
     DockerContainer, DockerImage, DockerNetwork, DockerComposeStack,
-    DockerContainerStatus, DockerVolumeMount, DockerPortMapping
+    DockerContainerState, DockerVolumeMount, DockerPortMapping
 )
 from ...core.value_objects.host_connection import HostConnection
 import logging
@@ -32,17 +32,17 @@ class MockDockerContainerRepository(DockerContainerRepository):
                 id="mock-container-1",
                 name="app_web_1",
                 image="nginx:latest",
-                status=DockerContainerStatus.RUNNING,
+                state=DockerContainerState.RUNNING,
                 created_at=datetime.now(),
                 labels={"com.docker.compose.project": "app"},
-                mounts=[
+                volume_mounts=[
                     DockerVolumeMount(
                         source="/data/app/html",
-                        destination="/usr/share/nginx/html",
+                        target="/usr/share/nginx/html",
                         read_only=False
                     )
                 ],
-                ports=[
+                port_mappings=[
                     DockerPortMapping(
                         host_port=8080,
                         container_port=80,
@@ -194,9 +194,10 @@ class MockDockerComposeRepository(DockerComposeRepository):
                 name="app",
                 compose_file_path="/apps/app/docker-compose.yml",
                 project_directory="/apps/app",
-                services=["web", "db", "redis"],
-                networks=["app_default"],
-                volumes=["app_data", "app_logs"]
+                containers=[],
+                services={"web": {}, "db": {}, "redis": {}},
+                networks=[],
+                volumes={"app_data": {}, "app_logs": {}}
             )
         ]
     

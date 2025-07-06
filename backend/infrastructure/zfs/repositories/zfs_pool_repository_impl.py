@@ -15,16 +15,25 @@ logger = logging.getLogger(__name__)
 
 
 class ZFSPoolRepositoryImpl(ZFSPoolRepository):
-    """ZFS Pool repository implementation using existing ZFSOps"""
+    """ZFS Pool repository implementation using existing ZFSOperations"""
     
     def __init__(self):
         self._zfs_ops = ZFSOperations()
+    
+    async def _get_pool_names(self) -> List[str]:
+        """Derive pool names from dataset list since zpool_list helper is not available."""
+        try:
+            datasets = await self._zfs_ops.list_datasets()
+            pool_names = sorted({ds.split('/')[0] for ds in datasets})
+            return pool_names
+        except Exception:
+            return []
     
     async def list_all(self) -> List[ZFSPool]:
         """List all ZFS pools"""
         try:
             # Use existing zpool_list method
-            pool_names = await self._zfs_ops.zpool_list()
+            pool_names = await self._get_pool_names()
             
             pools = []
             for pool_name in pool_names:
@@ -42,7 +51,7 @@ class ZFSPoolRepositoryImpl(ZFSPoolRepository):
         """Find a pool by name"""
         try:
             # Check if pool exists
-            pool_names = await self._zfs_ops.zpool_list()
+            pool_names = await self._get_pool_names()
             if name not in pool_names:
                 return None
             
@@ -84,19 +93,10 @@ class ZFSPoolRepositoryImpl(ZFSPoolRepository):
     async def get_properties(self, name: str) -> Dict[str, str]:
         """Get pool properties"""
         try:
-            # Use zpool get all command
-            returncode, stdout, stderr = await self._zfs_ops.safe_run_zfs_command(
-                "get", "-H", "-p", "all", name
-            )
-            
-            if returncode != 0:
-                logger.error(f"Failed to get pool properties: {stderr}")
+            # Fallback: use get_pool_status details (zpool properties unavailable)
+            status_info = await self.get_status(name)
+            if not status_info:
                 return {}
-            
-            # Note: The safe_run_zfs_command runs zfs commands, not zpool
-            # For zpool properties, we need to use zpool status and parse
-            status_info = await self._zfs_ops.zpool_status(name)
-            
             properties = {}
             
             # Extract basic properties from status
@@ -136,7 +136,7 @@ class ZFSPoolRepositoryImpl(ZFSPoolRepository):
     async def get_status(self, name: str) -> Dict[str, Any]:
         """Get pool status"""
         try:
-            return await self._zfs_ops.zpool_status(name)
+            return await self._zfs_ops.get_pool_status(name)
         except Exception as e:
             logger.error(f"Failed to get status for pool {name}: {e}")
             return {}
@@ -144,7 +144,7 @@ class ZFSPoolRepositoryImpl(ZFSPoolRepository):
     async def scrub(self, name: str) -> bool:
         """Start scrub on pool"""
         try:
-            return await self._zfs_ops.zpool_scrub(name)
+            return await self._zfs_ops.start_pool_scrub(name)
         except Exception as e:
             logger.error(f"Failed to scrub pool {name}: {e}")
             return False
@@ -226,7 +226,7 @@ class ZFSPoolRepositoryImpl(ZFSPoolRepository):
         """Get pool I/O statistics"""
         try:
             # Use existing zpool_iostat method
-            iostat_data = await self._zfs_ops.zpool_iostat(name)
+            iostat_data = await self._zfs_ops.get_zfs_iostat([name], interval=1, count=1)
             
             # Add high latency detection
             if 'operations' in iostat_data:

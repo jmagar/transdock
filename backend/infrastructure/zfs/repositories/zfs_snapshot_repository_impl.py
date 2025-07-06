@@ -17,10 +17,14 @@ logger = logging.getLogger(__name__)
 
 
 class ZFSSnapshotRepositoryImpl(ZFSSnapshotRepository):
-    """ZFS Snapshot repository implementation using existing ZFSOps"""
+    """ZFS Snapshot repository implementation using existing ZFSOperations"""
     
     def __init__(self):
         self._zfs_ops = ZFSOperations()
+    
+    async def _run_zfs_command(self, *args: str) -> tuple[int, str, str]:
+        """Internal helper that proxies to ZFSOperations.safe_run_zfs_command but returns a tuple."""
+        return await self._zfs_ops.safe_run_zfs_command(*args)
     
     async def create(self, dataset_name: DatasetName, snapshot_name: str) -> ZFSSnapshot:
         """Create a snapshot"""
@@ -28,12 +32,9 @@ class ZFSSnapshotRepositoryImpl(ZFSSnapshotRepository):
             full_snapshot_name = SnapshotName.create(dataset_name, snapshot_name)
             
             # Use existing ZFSOps method
-            result = await self._zfs_ops._run_zfs_command(
-                ["snapshot", str(full_snapshot_name)]
-            )
-            
-            if result.returncode != 0:
-                raise Exception(f"Failed to create snapshot: {result.stderr}")
+            rc, stdout, stderr = await self._run_zfs_command("snapshot", str(full_snapshot_name))
+            if rc != 0:
+                raise Exception(f"Failed to create snapshot: {stderr}")
             
             # Get snapshot info
             snapshot = await self.find_by_name(full_snapshot_name)
@@ -54,19 +55,17 @@ class ZFSSnapshotRepositoryImpl(ZFSSnapshotRepository):
         """Find a snapshot by name"""
         try:
             # Use existing ZFSOps to get snapshot info
-            result = await self._zfs_ops._run_zfs_command(
-                ["list", "-H", "-p", "-t", "snapshot", "-o", 
-                 "name,creation,used,referenced", str(name)]
+            rc, stdout, stderr = await self._run_zfs_command(
+                "list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,used,referenced", str(name)
             )
-            
-            if result.returncode != 0:
+            if rc != 0:
                 return None
             
-            if not result.stdout.strip():
+            if not stdout.strip():
                 return None
             
             # Parse output
-            parts = result.stdout.strip().split('\t')
+            parts = stdout.strip().split('\t')
             if len(parts) >= 4:
                 properties = {
                     'creation': parts[1],
@@ -93,16 +92,14 @@ class ZFSSnapshotRepositoryImpl(ZFSSnapshotRepository):
         """List all snapshots"""
         try:
             # Use existing ZFSOps method
-            result = await self._zfs_ops._run_zfs_command(
-                ["list", "-H", "-p", "-t", "snapshot", "-o",
-                 "name,creation,used,referenced"]
+            rc, stdout, stderr = await self._run_zfs_command(
+                "list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,used,referenced"
             )
-            
-            if result.returncode != 0:
+            if rc != 0:
                 return []
             
             snapshots = []
-            for line in result.stdout.strip().split('\n'):
+            for line in stdout.strip().split('\n'):
                 if not line:
                     continue
                 
@@ -147,11 +144,8 @@ class ZFSSnapshotRepositoryImpl(ZFSSnapshotRepository):
     async def delete(self, name: SnapshotName) -> bool:
         """Delete a snapshot"""
         try:
-            result = await self._zfs_ops._run_zfs_command(
-                ["destroy", str(name)]
-            )
-            
-            return result.returncode == 0
+            rc, stdout, stderr = await self._run_zfs_command("destroy", str(name))
+            return rc == 0
             
         except Exception as e:
             logger.error(f"Failed to delete snapshot {name}: {e}")
@@ -166,9 +160,8 @@ class ZFSSnapshotRepositoryImpl(ZFSSnapshotRepository):
                 cmd.append("-f")  # Force unmount/remount
             cmd.append(str(name))
             
-            result = await self._zfs_ops._run_zfs_command(cmd)
-            
-            return result.returncode == 0
+            rc, stdout, stderr = await self._run_zfs_command(*cmd)
+            return rc == 0
             
         except Exception as e:
             logger.error(f"Failed to rollback to snapshot {name}: {e}")
@@ -177,11 +170,8 @@ class ZFSSnapshotRepositoryImpl(ZFSSnapshotRepository):
     async def clone(self, snapshot_name: SnapshotName, target_dataset: DatasetName) -> bool:
         """Clone a snapshot to create a new dataset"""
         try:
-            result = await self._zfs_ops._run_zfs_command(
-                ["clone", str(snapshot_name), str(target_dataset)]
-            )
-            
-            return result.returncode == 0
+            rc, _, _ = await self._run_zfs_command("clone", str(snapshot_name), str(target_dataset))
+            return rc == 0
             
         except Exception as e:
             logger.error(f"Failed to clone snapshot {snapshot_name}: {e}")
@@ -230,15 +220,12 @@ class ZFSSnapshotRepositoryImpl(ZFSSnapshotRepository):
     async def get_properties(self, name: SnapshotName) -> Dict[str, str]:
         """Get all properties of a snapshot"""
         try:
-            result = await self._zfs_ops._run_zfs_command(
-                ["get", "-H", "-p", "all", str(name)]
-            )
-            
-            if result.returncode != 0:
+            rc, stdout, stderr = await self._run_zfs_command("get", "-H", "-p", "all", str(name))
+            if rc != 0:
                 return {}
             
             properties = {}
-            for line in result.stdout.strip().split('\n'):
+            for line in stdout.strip().split('\n'):
                 if not line:
                     continue
                 
