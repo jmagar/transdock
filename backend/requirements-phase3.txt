@@ -1,0 +1,23 @@
+# Phase 3 Database Dependencies
+
+# PostgreSQL async driver
+asyncpg==0.29.0
+
+# SQLAlchemy with async support
+sqlalchemy[asyncio]==2.0.23
+
+# Database migrations
+alembic==1.13.0
+
+# Additional async utilities
+greenlet==3.0.1
+
+# YAML parsing for compose files
+pyyaml==6.0.1
+
+# Docker SDK
+docker==6.1.3
+
+# API framework
+fastapi==0.109.0
+uvicorn==0.25.0
